@@ -140,7 +140,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(8),  // Mode & Template
-            Constraint::Length(10), // Silicon Architecture
+            Constraint::Length(12), // Silicon Architecture
             Constraint::Min(8),     // AtomicChat 16GB Guide Models
         ])
         .split(area);
@@ -189,28 +189,37 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(mode_lines).block(mode_block), sidebar_chunks[0]);
 
     // 2. Hardware Specs Card
+    let offloaded = app.engine.offloaded_layers();
+    let total = app.engine.total_layers();
     let hw_lines = vec![
         Line::from(vec![
             Span::styled("Chip: ", Style::default().fg(app.theme.text_muted)),
             Span::styled(&app.hardware.chip_name, Style::default().fg(app.theme.text_bright).add_modifier(Modifier::BOLD)),
         ]),
         Line::from(vec![
-            Span::styled("Cores: ", Style::default().fg(app.theme.text_muted)),
+            Span::styled("GPU: ", Style::default().fg(app.theme.text_muted)),
             Span::styled(
-                format!("{}P + {}E | {} GPU Cores", app.hardware.p_cores, app.hardware.e_cores, app.hardware.gpu_cores),
-                Style::default().fg(app.theme.neon_cyan),
+                format!("MTL0 ({} GPU cores)", app.hardware.gpu_cores),
+                Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
-            Span::styled("Unified RAM: ", Style::default().fg(app.theme.text_muted)),
+            Span::styled("Layers: ", Style::default().fg(app.theme.text_muted)),
             Span::styled(
-                format!("{} GB ({} GB/s)", app.hardware.memory_gb, app.hardware.memory_bandwidth_gbps),
+                format!("{}/{} on Metal 3 GPU", offloaded, total),
+                Style::default().fg(app.theme.neon_green).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Memory: ", Style::default().fg(app.theme.text_muted)),
+            Span::styled(
+                format!("{} GB ({} GB/s Unified)", app.hardware.memory_gb, app.hardware.memory_bandwidth_gbps),
                 Style::default().fg(app.theme.neon_green),
             ),
         ]),
         Line::from(vec![
             Span::styled("KV Cache: ", Style::default().fg(app.theme.text_muted)),
-            Span::styled("Q8_0 Quantized (Metal 3)", Style::default().fg(app.theme.neon_amber)),
+            Span::styled("Q8_0 Quantized (Metal)", Style::default().fg(app.theme.neon_amber)),
         ]),
         Line::from(vec![
             Span::styled("Model: ", Style::default().fg(app.theme.text_muted)),

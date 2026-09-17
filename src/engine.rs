@@ -102,6 +102,14 @@ impl ModelEngine {
         })
     }
 
+    pub fn total_layers(&self) -> u32 {
+        self.model.n_layer()
+    }
+
+    pub fn offloaded_layers(&self) -> u32 {
+        self.model.n_layer().min(self.n_gpu_layers)
+    }
+
     /// Explicitly clear the persistent prefix cache
     pub fn clear_cache(&self) {
         if let Ok(mut ctx_guard) = self.context.lock() {
