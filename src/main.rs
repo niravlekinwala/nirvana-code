@@ -162,7 +162,7 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize) -> Result<()> {
 
     let eng1 = engine.clone();
     tokio::task::spawn_blocking(move || {
-        let _ = eng1.stream_generate(&test_prompt_1, num_tokens, 0.2, cancel1, tx1);
+        let _ = eng1.stream_generate(&test_prompt_1, num_tokens, 0.0, cancel1, tx1);
     });
 
     let mut ttft_cold = 0;
@@ -183,7 +183,7 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize) -> Result<()> {
 
     let eng2 = engine.clone();
     tokio::task::spawn_blocking(move || {
-        let _ = eng2.stream_generate(&test_prompt_2, num_tokens, 0.2, cancel2, tx2);
+        let _ = eng2.stream_generate(&test_prompt_2, num_tokens, 0.0, cancel2, tx2);
     });
 
     let mut ttft_warm = 0;

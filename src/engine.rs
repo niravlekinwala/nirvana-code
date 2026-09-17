@@ -153,8 +153,11 @@ impl ModelEngine {
         if ctx_guard.is_none() {
             let ctx_params = LlamaContextParams::default()
                 .with_n_ctx(Some(NonZeroU32::new(self.n_ctx).unwrap()))
-                .with_n_threads(8)
+                .with_n_threads(4)
                 .with_n_threads_batch(8)
+                .with_n_batch(512)
+                .with_n_ubatch(512)
+                .with_flash_attention_policy(llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_AUTO)
                 .with_type_k(self.kv_mode.to_llama_type())
                 .with_type_v(self.kv_mode.to_llama_type());
 
@@ -218,12 +221,11 @@ impl ModelEngine {
         // Update cached tokens to reflect full prompt in KV cache
         cached_guard.extend_from_slice(tokens_to_eval);
 
-        // 4. Setup Sampler with Apple Silicon Repetition Penalty
+        // 4. Setup Sampler
         let mut sampler = if temperature <= 0.05 {
             LlamaSampler::greedy()
         } else {
             LlamaSampler::chain_simple([
-                LlamaSampler::penalties(self.model.n_vocab(), 64, 1.15, 0.0, 0.0),
                 LlamaSampler::top_k(40),
                 LlamaSampler::top_p(0.9, 1),
                 LlamaSampler::temp(temperature),
