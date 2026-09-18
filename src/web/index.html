@@ -904,6 +904,120 @@
       }
     });
 
+    async function showInteractiveModelList() {
+      try {
+        const res = await fetch('/v1/models');
+        const data = await res.json();
+        if (!data.data || data.data.length === 0) {
+          showToast('No models installed');
+          return;
+        }
+
+        heroSplash.style.display = 'none';
+
+        const msgDiv = document.createElement('div');
+        msgDiv.className = 'message system';
+        msgDiv.style.border = '1px solid var(--neon-cyan)';
+        msgDiv.style.borderRadius = '8px';
+        msgDiv.style.padding = '14px';
+        msgDiv.style.marginBottom = '16px';
+        msgDiv.style.background = 'rgba(0, 240, 255, 0.04)';
+
+        const headerDiv = document.createElement('div');
+        headerDiv.style.fontWeight = '700';
+        headerDiv.style.color = 'var(--neon-cyan)';
+        headerDiv.style.marginBottom = '10px';
+        headerDiv.style.display = 'flex';
+        headerDiv.style.alignItems = 'center';
+        headerDiv.style.justifyContent = 'space-between';
+        headerDiv.innerHTML = `
+          <span>⚡ AVAILABLE APPLE SILICON MODELS (${data.data.length} INSTALLED)</span>
+          <span style="font-size: 11px; color: var(--text-dim); font-weight: normal;">Type /model &lt;1..${data.data.length}&gt; or click below</span>
+        `;
+
+        const bodyDiv = document.createElement('div');
+        bodyDiv.style.display = 'flex';
+        bodyDiv.style.flexDirection = 'column';
+        bodyDiv.style.gap = '8px';
+
+        data.data.forEach((m, idx) => {
+          const isCurrent = m.active || m.id === data.current_model;
+          const sizeMb = m.size_bytes ? Math.round(m.size_bytes / (1024 * 1024)) : 0;
+          const card = document.createElement('div');
+          card.style.background = isCurrent ? 'rgba(0, 255, 159, 0.08)' : 'rgba(255, 255, 255, 0.03)';
+          card.style.border = `1px solid ${isCurrent ? 'var(--neon-green)' : 'var(--border-dim)'}`;
+          card.style.borderRadius = '6px';
+          card.style.padding = '10px 14px';
+          card.style.display = 'flex';
+          card.style.alignItems = 'center';
+          card.style.justifyContent = 'space-between';
+          card.style.gap = '12px';
+
+          const info = document.createElement('div');
+          info.innerHTML = `
+            <div>
+              <span style="color: var(--neon-amber); font-weight: 700; margin-right: 6px;">[${idx + 1}]</span>
+              <strong style="color: ${isCurrent ? 'var(--neon-green)' : 'var(--text-bright)'}; font-size: 13px;">${m.display_name || m.id}</strong>
+            </div>
+            <div style="font-size: 11px; color: var(--text-dim); margin-top: 3px;">
+              ${sizeMb} MB &bull; Apple Silicon Metal 3 GPU &bull; Unified Memory
+            </div>
+          `;
+
+          const actionDiv = document.createElement('div');
+          if (isCurrent) {
+            actionDiv.innerHTML = '<span class="badge badge-green" style="padding: 4px 10px;">● ACTIVE</span>';
+          } else {
+            const btn = document.createElement('button');
+            btn.className = 'copy-btn';
+            btn.style.background = 'var(--neon-cyan)';
+            btn.style.color = 'var(--bg-dark)';
+            btn.style.fontWeight = '700';
+            btn.style.cursor = 'pointer';
+            btn.style.padding = '5px 12px';
+            btn.style.fontSize = '12px';
+            btn.textContent = '⚡ Select Model';
+            btn.onclick = () => window.switchModelDirect(m.id);
+            actionDiv.appendChild(btn);
+          }
+
+          card.appendChild(info);
+          card.appendChild(actionDiv);
+          bodyDiv.appendChild(card);
+        });
+
+        msgDiv.appendChild(headerDiv);
+        msgDiv.appendChild(bodyDiv);
+        messagesViewport.appendChild(msgDiv);
+        messagesViewport.scrollTop = messagesViewport.scrollHeight;
+
+        sidebar.classList.remove('collapsed');
+      } catch (err) {
+        showToast(`❌ Failed to list models: ${err.message}`);
+      }
+    }
+
+    window.switchModelDirect = async function(modelId) {
+      showToast(`⏳ Loading ${modelId}...`);
+      try {
+        const res = await fetch('/v1/models/load', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: modelId })
+        });
+        const result = await res.json();
+        if (res.ok) {
+          showToast(`✔ Switched to ${result.model || modelId}`);
+          await loadModelInfo();
+          await showInteractiveModelList();
+        } else {
+          showToast(`❌ ${result.error || 'Switch failed'}`);
+        }
+      } catch (e) {
+        showToast(`❌ Error: ${e.message}`);
+      }
+    };
+
     // Markdown Parser
     function renderMarkdown(content) {
       const codeBlockRegex = /```([a-zA-Z0-9_\-\+]*)\n([\s\S]*?)```/g;
@@ -1024,7 +1138,7 @@
       if (input.startsWith('/')) {
         const parts = input.split(' ');
         const cmd = parts[0].toLowerCase();
-        if (cmd === '/model' || cmd === '/switch' || cmd === '/load') {
+        if (cmd === '/model' || cmd === '/models' || cmd === '/switch' || cmd === '/load') {
           promptInput.value = '';
           promptInput.style.height = 'auto';
           if (parts.length > 1) {
@@ -1047,7 +1161,7 @@
               showToast(`❌ Error: ${e.message}`);
             }
           } else {
-            showToast('Usage: /model <name-or-id>');
+            await showInteractiveModelList();
           }
           return;
         } else if (cmd === '/clear') {
