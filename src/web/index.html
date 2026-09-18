@@ -640,6 +640,16 @@
       </div>
 
       <div class="sidebar-section">
+        <div class="section-title">🧠 Active Model (Switch On-The-Fly)</div>
+        <select class="template-select" id="modelSelect">
+          <option value="">Scanning installed models...</option>
+        </select>
+        <div id="modelStatus" style="font-size: 11px; color: var(--neon-green); margin-top: 5px;">
+          ✔ Apple Silicon Metal 3 GPU
+        </div>
+      </div>
+
+      <div class="sidebar-section">
         <div class="section-title">🎯 Reasoning Protocol</div>
         <select class="template-select" id="templateSelect">
           <option value="offline-assistant">Offline Coding Assistant</option>
@@ -827,19 +837,72 @@
       showToast('✔ Conversation cleared');
     });
 
-    // Fetch initial model info
+    const modelSelect = document.getElementById('modelSelect');
+    const modelStatus = document.getElementById('modelStatus');
+
+    // Fetch initial model info & populate dropdown
     async function loadModelInfo() {
       try {
         const res = await fetch('/v1/models');
         const data = await res.json();
         if (data.data && data.data.length > 0) {
-          specModel.textContent = data.data[data.data.length - 1].id || 'qwen-1.5b';
+          modelSelect.innerHTML = '';
+          const current = data.current_model || '';
+          data.data.forEach(m => {
+            const opt = document.createElement('option');
+            opt.value = m.id;
+            const sizeStr = m.size_bytes ? ` (${Math.round(m.size_bytes / (1024 * 1024))} MB)` : '';
+            opt.textContent = `${m.display_name || m.id}${sizeStr}`;
+            if (m.active || m.id === current) {
+              opt.selected = true;
+            }
+            modelSelect.appendChild(opt);
+          });
+          specModel.textContent = current || data.data[0].id;
         }
       } catch (err) {
         specModel.textContent = 'Nirvana Silicon';
       }
     }
     loadModelInfo();
+
+    // On-the-fly Model Switcher
+    modelSelect.addEventListener('change', async () => {
+      const selected = modelSelect.value;
+      if (!selected) return;
+
+      showToast(`⏳ Loading ${selected} onto Apple Silicon Metal GPU...`);
+      modelStatus.style.color = 'var(--neon-amber)';
+      modelStatus.textContent = '⏳ Loading into Unified LPDDR5 RAM...';
+      modelSelect.disabled = true;
+      sendBtn.disabled = true;
+
+      try {
+        const res = await fetch('/v1/models/load', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: selected })
+        });
+        const result = await res.json();
+        if (res.ok) {
+          specModel.textContent = result.model || selected;
+          modelStatus.style.color = 'var(--neon-green)';
+          modelStatus.textContent = '✔ Active on Metal 3 GPU';
+          showToast(`✔ Loaded: ${result.model || selected}`);
+        } else {
+          showToast(`❌ Error: ${result.error || 'Failed to switch model'}`);
+          modelStatus.style.color = 'var(--neon-magenta)';
+          modelStatus.textContent = '❌ Model load failed';
+        }
+      } catch (err) {
+        showToast(`❌ Network error: ${err.message}`);
+        modelStatus.style.color = 'var(--neon-magenta)';
+        modelStatus.textContent = '❌ Switch error';
+      } finally {
+        modelSelect.disabled = false;
+        sendBtn.disabled = false;
+      }
+    });
 
     // Markdown Parser
     function renderMarkdown(content) {
@@ -957,6 +1020,44 @@
       const input = promptInput.value.trim();
       if (!input) return;
 
+      // Handle slash commands (/model, /models, /clear)
+      if (input.startsWith('/')) {
+        const parts = input.split(' ');
+        const cmd = parts[0].toLowerCase();
+        if (cmd === '/model' || cmd === '/switch' || cmd === '/load') {
+          promptInput.value = '';
+          promptInput.style.height = 'auto';
+          if (parts.length > 1) {
+            const target = parts.slice(1).join(' ');
+            showToast(`⏳ Loading ${target}...`);
+            try {
+              const res = await fetch('/v1/models/load', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: target })
+              });
+              const result = await res.json();
+              if (res.ok) {
+                showToast(`✔ Switched to ${result.model || target}`);
+                await loadModelInfo();
+              } else {
+                showToast(`❌ ${result.error || 'Failed'}`);
+              }
+            } catch (e) {
+              showToast(`❌ Error: ${e.message}`);
+            }
+          } else {
+            showToast('Usage: /model <name-or-id>');
+          }
+          return;
+        } else if (cmd === '/clear') {
+          promptInput.value = '';
+          promptInput.style.height = 'auto';
+          document.getElementById('btnClearChat').click();
+          return;
+        }
+      }
+
       // Add user message
       chatHistory.push({ role: 'user', content: input });
       appendMessage('user', input);
@@ -990,6 +1091,7 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
+            model: modelSelect.value || undefined,
             messages,
             stream: true,
             temperature: 0.7,

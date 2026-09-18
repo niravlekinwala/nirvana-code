@@ -1,6 +1,5 @@
 use anyhow::{bail, Result};
 use llama_cpp_2::context::params::LlamaContextParams;
-use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
@@ -16,7 +15,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::engine::{ModelEngine, StreamEvent};
 
 pub struct SpeculativeEngine {
-    backend: Arc<LlamaBackend>,
+    backend: Arc<crate::engine::SharedBackend>,
     pub target_model: Arc<LlamaModel>,
     pub draft_model: Arc<LlamaModel>,
     pub n_gpu_layers: u32,
@@ -33,9 +32,7 @@ impl SpeculativeEngine {
         n_ctx: u32,
         n_draft: usize,
     ) -> Result<Self> {
-        let mut backend = LlamaBackend::init()?;
-        backend.void_logs();
-        let backend = Arc::new(backend);
+        let backend = crate::engine::SharedBackend::get()?;
 
         let model_params = LlamaModelParams::default()
             .with_n_gpu_layers(n_gpu_layers)

@@ -10,7 +10,7 @@ use llama_cpp_2::token::LlamaToken;
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -83,8 +83,34 @@ impl Default for GenerationConfig {
     }
 }
 
+static BACKEND: OnceLock<Arc<SharedBackend>> = OnceLock::new();
+
+pub struct SharedBackend(pub LlamaBackend);
+unsafe impl Send for SharedBackend {}
+unsafe impl Sync for SharedBackend {}
+
+impl std::ops::Deref for SharedBackend {
+    type Target = LlamaBackend;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl SharedBackend {
+    pub fn get() -> Result<Arc<Self>> {
+        if let Some(b) = BACKEND.get() {
+            return Ok(b.clone());
+        }
+        let mut backend = LlamaBackend::init()?;
+        backend.void_logs();
+        let shared = Arc::new(SharedBackend(backend));
+        let _ = BACKEND.set(shared.clone());
+        Ok(shared)
+    }
+}
+
 pub struct ModelEngine {
-    backend: Arc<LlamaBackend>,
+    backend: Arc<SharedBackend>,
     pub model: Arc<LlamaModel>,
     // Persistent context for Prefix Caching across generations
     context: Mutex<Option<LlamaContext<'static>>>,
@@ -125,9 +151,7 @@ impl ModelEngine {
         kv_mode: KvQuantMode,
         n_ctx: u32,
     ) -> Result<Self> {
-        let mut backend = LlamaBackend::init()?;
-        backend.void_logs();
-        let backend = Arc::new(backend);
+        let backend = SharedBackend::get()?;
 
         // Apple Silicon Memory Locking (mlock) prevents virtual memory page-outs
         let model_params = LlamaModelParams::default()
