@@ -42,6 +42,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_model_picker_modal(f, app, size);
     }
 
+    // Attach file modal popup
+    if app.show_attach_modal {
+        draw_attach_modal(f, app, size);
+    }
+
     // Exit confirmation modal popup
     if app.exit_confirmation {
         draw_exit_confirmation_modal(f, app, size);
@@ -296,13 +301,26 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_content_pane(f: &mut Frame, app: &mut App, area: Rect) {
-    let pane_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(6),    // Output conversation
-            Constraint::Length(6), // Input textarea
-        ])
-        .split(area);
+    let (conversation_area, attachment_area, input_area) = if app.current_attachment.is_some() {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(6),    // Output conversation
+                Constraint::Length(3), // Attachment preview pill
+                Constraint::Length(6), // Input textarea
+            ])
+            .split(area);
+        (chunks[0], Some(chunks[1]), chunks[2])
+    } else {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(6),    // Output conversation
+                Constraint::Length(6), // Input textarea
+            ])
+            .split(area);
+        (chunks[0], None, chunks[1])
+    };
 
     // 1. Output conversation with live syntax highlighted markdown
     let mut lines = Vec::new();
@@ -386,8 +404,8 @@ fn draw_content_pane(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    let inner_height = pane_chunks[0].height.saturating_sub(2) as usize;
-    let inner_width = pane_chunks[0].width.saturating_sub(2) as usize;
+    let inner_height = conversation_area.height.saturating_sub(2) as usize;
+    let inner_width = conversation_area.width.saturating_sub(2) as usize;
 
     let total_visual_lines = calculate_visual_lines(&lines, inner_width);
     let max_scroll = (total_visual_lines.saturating_sub(inner_height)) as u16;
@@ -431,7 +449,7 @@ fn draw_content_pane(f: &mut Frame, app: &mut App, area: Rect) {
         .block(out_block)
         .wrap(Wrap { trim: false })
         .scroll((app.scroll_offset, 0));
-    f.render_widget(out_paragraph, pane_chunks[0]);
+    f.render_widget(out_paragraph, conversation_area);
 
     // Render interactive visual scrollbar on the right edge of workspace
     if app.max_scroll > 0 {
@@ -448,15 +466,37 @@ fn draw_content_pane(f: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 app.theme.neon_amber
             }));
-        f.render_stateful_widget(scrollbar, pane_chunks[0], &mut scrollbar_state);
+        f.render_stateful_widget(scrollbar, conversation_area, &mut scrollbar_state);
     }
 
-    // 2. Input Box
+    // 2. Attachment Preview Chip
+    if let Some(att_area) = attachment_area {
+        if let Some(ref att) = app.current_attachment {
+            let att_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(app.theme.neon_cyan))
+                .style(Style::default().bg(app.theme.bg_card));
+
+            let att_lines = vec![
+                Line::from(vec![
+                    Span::styled(format!(" {} ATTACHED: ", att.file_type.icon()), Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD)),
+                    Span::styled(&att.filename, Style::default().fg(app.theme.text_bright).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("  [{}]  ", att.metadata_summary), Style::default().fg(app.theme.neon_green)),
+                    Span::styled(" (Ctrl+D or /detach to remove) ", Style::default().fg(app.theme.text_muted)),
+                ]),
+            ];
+            let p = Paragraph::new(att_lines).block(att_block);
+            f.render_widget(p, att_area);
+        }
+    }
+
+    // 3. Input Box
     let is_generating = app.engine_state == EngineState::Generating;
     let input_title = if is_generating {
         " Prompt (Generating... Press Ctrl+C to cancel) "
     } else {
-        " Prompt / Code Question (Enter to Send | Ctrl+P Switch Model | Ctrl+K Palette) "
+        " Prompt / Code Question (Enter to Send | Ctrl+F Attach | Ctrl+P Switch Model | Ctrl+K Palette) "
     };
 
     let input_border_style = if is_generating {
@@ -474,7 +514,7 @@ fn draw_content_pane(f: &mut Frame, app: &mut App, area: Rect) {
         .style(Style::default().bg(app.theme.bg_input));
 
     app.input_textarea.set_block(input_block);
-    f.render_widget(&app.input_textarea, pane_chunks[1]);
+    f.render_widget(&app.input_textarea, input_area);
 }
 
 fn draw_footer_status(f: &mut Frame, app: &App, area: Rect) {
@@ -483,6 +523,8 @@ fn draw_footer_status(f: &mut Frame, app: &App, area: Rect) {
     let footer_line = Line::from(vec![
         Span::styled(" [Enter] ", Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD)),
         Span::styled("Send  ", Style::default().fg(app.theme.text_dim)),
+        Span::styled("[Ctrl+F] ", Style::default().fg(app.theme.neon_green).add_modifier(Modifier::BOLD)),
+        Span::styled("Attach  ", Style::default().fg(app.theme.text_dim)),
         Span::styled("[Shift+Enter] ", Style::default().fg(app.theme.neon_cyan)),
         Span::styled("Newline  ", Style::default().fg(app.theme.text_dim)),
         Span::styled("[↑/↓ or Scroll] ", Style::default().fg(app.theme.neon_green).add_modifier(Modifier::BOLD)),
@@ -739,6 +781,80 @@ fn draw_model_picker_modal(f: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(footer_hint).alignment(Alignment::Center),
         chunks[1],
     );
+}
+
+fn draw_attach_modal(f: &mut Frame, app: &App, area: Rect) {
+    let popup_width = 76.min(area.width.saturating_sub(4));
+    let popup_height = 11.min(area.height.saturating_sub(4));
+    let popup_x = (area.width.saturating_sub(popup_width)) / 2;
+    let popup_y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_rect = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_rect);
+
+    let modal_block = Block::default()
+        .title(" 📎 ATTACH FILE (PDF, Image, Doc, Code) ")
+        .title_style(app.theme.title_style())
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(app.theme.neon_cyan))
+        .style(Style::default().bg(app.theme.bg_card));
+
+    let inner_area = modal_block.inner(popup_rect);
+    f.render_widget(modal_block, popup_rect);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Instruction
+            Constraint::Length(3), // Input box with border
+            Constraint::Length(2), // Supported types description
+            Constraint::Length(1), // Footer keys
+        ])
+        .split(inner_area);
+
+    let instr = Paragraph::new(Line::from(vec![
+        Span::styled("Enter path, paste clipboard, or drag & drop file into terminal:", Style::default().fg(app.theme.text_bright)),
+    ]));
+    f.render_widget(instr, chunks[0]);
+
+    // Input box
+    let input_display = if app.attach_input.is_empty() {
+        Line::from(vec![
+            Span::styled("e.g. ~/Downloads/report.pdf or /path/to/image.png", Style::default().fg(app.theme.text_dim)),
+            Span::styled("█", Style::default().fg(app.theme.neon_cyan)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(&app.attach_input, Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD)),
+            Span::styled("█", Style::default().fg(app.theme.neon_cyan)),
+        ])
+    };
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(app.theme.neon_cyan))
+        .style(Style::default().bg(app.theme.bg_input));
+    let input_p = Paragraph::new(input_display).block(input_block);
+    f.render_widget(input_p, chunks[1]);
+
+    let types_desc = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled("Apple Silicon Accelerators: ", Style::default().fg(app.theme.neon_green).add_modifier(Modifier::BOLD)),
+            Span::styled("PDFKit text (.pdf)  •  Vision OCR (.png,.jpg)  •  textutil (.docx,.rtf)", Style::default().fg(app.theme.text_muted)),
+        ]),
+    ]);
+    f.render_widget(types_desc, chunks[2]);
+
+    let footer_hint = Line::from(vec![
+        Span::styled(" [Enter] ", Style::default().fg(app.theme.neon_green).add_modifier(Modifier::BOLD)),
+        Span::styled("Attach File  ", Style::default().fg(app.theme.text_dim)),
+        Span::styled("[Esc] ", Style::default().fg(app.theme.text_muted)),
+        Span::styled("Cancel  ", Style::default().fg(app.theme.text_dim)),
+        Span::styled("[/detach] ", Style::default().fg(app.theme.neon_amber)),
+        Span::styled("Remove attachment", Style::default().fg(app.theme.text_dim)),
+    ]);
+    f.render_widget(Paragraph::new(footer_hint).alignment(Alignment::Center), chunks[3]);
 }
 
 fn calculate_visual_lines(lines: &[Line], width: usize) -> usize {

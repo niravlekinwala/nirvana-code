@@ -1,3 +1,4 @@
+use crate::attachment::Attachment;
 use crate::clipboard::ClipboardHelper;
 use crate::engine::{GenerationConfig, ModelEngine, StreamEvent};
 use crate::hardware::SiliconProfile;
@@ -79,6 +80,9 @@ pub struct App<'a> {
     pub show_sidebar: bool,
     pub show_model_picker: bool,
     pub model_picker_index: usize,
+    pub current_attachment: Option<Attachment>,
+    pub show_attach_modal: bool,
+    pub attach_input: String,
 }
 
 impl<'a> App<'a> {
@@ -143,6 +147,9 @@ impl<'a> App<'a> {
             show_sidebar: true,
             show_model_picker: false,
             model_picker_index: 0,
+            current_attachment: None,
+            show_attach_modal: false,
+            attach_input: String::new(),
         }
     }
 
@@ -170,7 +177,7 @@ impl<'a> App<'a> {
         }
 
         let input_text = self.input_textarea.lines().join("\n").trim().to_string();
-        if input_text.is_empty() {
+        if input_text.is_empty() && self.current_attachment.is_none() {
             return;
         }
 
@@ -180,7 +187,7 @@ impl<'a> App<'a> {
         self.auto_scroll = true;
         self.exit_confirmation = false;
 
-        // Check for slash commands (/model, /models, /clear, /sidebar)
+        // Check for slash commands (/model, /models, /clear, /sidebar, /attach, /file, /detach)
         if input_text.starts_with('/') {
             let parts: Vec<&str> = input_text.split_whitespace().collect();
             let cmd = parts[0].to_lowercase();
@@ -214,14 +221,43 @@ impl<'a> App<'a> {
                     self.set_toast("✔ KV Cache & conversation history cleared");
                     return;
                 }
+                "/attach" | "/file" => {
+                    if parts.len() > 1 {
+                        let path_str = parts[1..].join(" ");
+                        if let Err(e) = self.attach_file(&path_str) {
+                            self.set_toast(&format!("❌ Attachment failed: {}", e));
+                        }
+                    } else {
+                        self.open_attach_modal();
+                    }
+                    return;
+                }
+                "/detach" => {
+                    self.detach_file();
+                    return;
+                }
                 _ => {}
             }
         }
 
+        // Prepare prompt and display text (incorporating attachment if present)
+        let (display_content, engine_prompt_content) = if let Some(att) = self.current_attachment.take() {
+            let user_note = if input_text.is_empty() {
+                format!("Analyze attached {}", att.filename)
+            } else {
+                input_text.clone()
+            };
+            let formatted_engine = att.format_prompt(&input_text);
+            let display = format!("📎 [{} : {} ({})]\n{}", att.file_type.label(), att.filename, att.metadata_summary, user_note);
+            (display, formatted_engine)
+        } else {
+            (input_text.clone(), input_text.clone())
+        };
+
         // Add user message to history
         self.chat_history.push(ChatMessage {
             role: "user".to_string(),
-            content: input_text.clone(),
+            content: display_content,
             ttft_ms: None,
             tps: None,
             tokens: None,
@@ -237,16 +273,22 @@ impl<'a> App<'a> {
                     "<|im_start|>system\n{}<|im_end|>\n",
                     self.active_template.system_prompt
                 );
-                for msg in &self.chat_history {
+                let history_len = self.chat_history.len();
+                for (i, msg) in self.chat_history.iter().enumerate() {
+                    let text = if i + 1 == history_len && msg.role == "user" {
+                        &engine_prompt_content
+                    } else {
+                        &msg.content
+                    };
                     prompt_ctx.push_str(&format!(
                         "<|im_start|>{}\n{}<|im_end|>\n",
-                        msg.role, msg.content
+                        msg.role, text
                     ));
                 }
                 prompt_ctx.push_str("<|im_start|>assistant\n");
                 prompt_ctx
             }
-            _ => self.active_template.build_full_context(&input_text),
+            _ => self.active_template.build_full_context(&engine_prompt_content),
         };
 
         // Reset stream state
@@ -476,6 +518,12 @@ impl<'a> App<'a> {
             PaletteAction::CopyCodeSnippet(_) => {
                 self.copy_first_code_snippet();
             }
+            PaletteAction::AttachFile => {
+                self.open_attach_modal();
+            }
+            PaletteAction::DetachFile => {
+                self.detach_file();
+            }
             PaletteAction::ToggleSpeculative => {
                 self.set_toast("Speculative mode can be launched via: nirvana-code --speculative");
             }
@@ -492,6 +540,32 @@ impl<'a> App<'a> {
             }
         }
         self.show_palette = false;
+    }
+
+    pub fn open_attach_modal(&mut self) {
+        self.show_attach_modal = true;
+        self.attach_input.clear();
+    }
+
+    pub fn close_attach_modal(&mut self) {
+        self.show_attach_modal = false;
+        self.attach_input.clear();
+    }
+
+    pub fn attach_file(&mut self, path_str: &str) -> Result<()> {
+        let att = Attachment::from_file(path_str)?;
+        let summary = format!("📎 Attached {}: {} ({})", att.file_type.label(), att.filename, att.metadata_summary);
+        self.current_attachment = Some(att);
+        self.set_toast(&summary);
+        Ok(())
+    }
+
+    pub fn detach_file(&mut self) {
+        if let Some(att) = self.current_attachment.take() {
+            self.set_toast(&format!("✔ Detached {}", att.filename));
+        } else {
+            self.set_toast("No attachment to remove");
+        }
     }
 
     pub fn open_model_picker(&mut self) {

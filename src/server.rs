@@ -18,6 +18,7 @@ use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 
+use crate::attachment::Attachment;
 use crate::engine::{GenerationConfig, KvQuantMode, ModelEngine, StreamEvent};
 use crate::model_manager::ModelManager;
 
@@ -34,6 +35,36 @@ pub struct ServerState {
     pub use_mlock: bool,
     pub kv_mode: KvQuantMode,
     pub ctx_size: u32,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct AttachmentPayloadDto {
+    pub filename: String,
+    #[serde(default)]
+    pub data: Option<String>,
+    #[serde(default)]
+    pub extracted_text: Option<String>,
+    #[serde(default)]
+    pub metadata_summary: Option<String>,
+    #[serde(default)]
+    pub file_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProcessAttachmentRequest {
+    pub filename: String,
+    pub data: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProcessAttachmentResponse {
+    pub status: String,
+    pub filename: String,
+    pub file_type: String,
+    pub size_bytes: u64,
+    pub metadata_summary: String,
+    pub extracted_text_preview: String,
+    pub extracted_text: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,6 +86,8 @@ pub struct ChatCompletionRequest {
     pub top_k: i32,
     #[serde(default)]
     pub ngram_speculative: bool,
+    #[serde(default)]
+    pub attachment: Option<AttachmentPayloadDto>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -164,9 +197,72 @@ pub fn create_router(state: ServerState) -> Router {
         .route("/index.html", get(handle_index))
         .route("/v1/models", get(handle_models))
         .route("/v1/models/load", post(handle_load_model))
+        .route("/v1/attachments/process", post(handle_process_attachment))
         .route("/v1/chat/completions", post(handle_chat_completions))
         .layer(CorsLayer::permissive())
         .with_state(state)
+}
+
+async fn handle_process_attachment(
+    Json(req): Json<ProcessAttachmentRequest>,
+) -> Response {
+    let filename = req.filename.trim().to_string();
+    let data = req.data.trim().to_string();
+    if filename.is_empty() || data.is_empty() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Filename and data payload cannot be empty."
+            })),
+        )
+            .into_response();
+    }
+
+    let fname_clone = filename.clone();
+    let data_clone = data.clone();
+    let process_res = tokio::task::spawn_blocking(move || {
+        if data_clone.starts_with("data:") || (data_clone.len() > 100 && !data_clone.contains('\n') && !data_clone.starts_with('/')) {
+            Attachment::from_base64(&fname_clone, &data_clone)
+        } else {
+            Attachment::from_file(&data_clone).or_else(|_| Attachment::from_base64(&fname_clone, &data_clone))
+        }
+    })
+    .await;
+
+    match process_res {
+        Ok(Ok(att)) => {
+            let preview = if att.extracted_text.len() > 400 {
+                format!("{}...", &att.extracted_text[..400])
+            } else {
+                att.extracted_text.clone()
+            };
+
+            Json(ProcessAttachmentResponse {
+                status: "success".to_string(),
+                filename: att.filename,
+                file_type: att.file_type.label().to_string(),
+                size_bytes: att.size_bytes,
+                metadata_summary: att.metadata_summary,
+                extracted_text_preview: preview,
+                extracted_text: att.extracted_text,
+            })
+            .into_response()
+        }
+        Ok(Err(e)) => (
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": format!("Attachment extraction failed: {}", e)
+            })),
+        )
+            .into_response(),
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("Attachment task panicked: {}", e)
+            })),
+        )
+            .into_response(),
+    }
 }
 
 async fn handle_index() -> Html<&'static str> {
@@ -323,7 +419,10 @@ async fn handle_load_model(
     }
 }
 
-fn format_messages_to_prompt(messages: &[ChatMessageDto]) -> String {
+fn format_messages_to_prompt(
+    messages: &[ChatMessageDto],
+    attachment: Option<&AttachmentPayloadDto>,
+) -> String {
     let mut prompt = String::new();
     let mut has_system = false;
 
@@ -338,8 +437,45 @@ fn format_messages_to_prompt(messages: &[ChatMessageDto]) -> String {
         prompt.push_str("<|im_start|>system\nYou are Nirvana Code, an ultra-low latency Apple Silicon coding assistant. Provide clean, fast, reliable code.<|im_end|>\n");
     }
 
-    for msg in messages {
-        if msg.role.to_lowercase() != "system" {
+    let non_sys: Vec<&ChatMessageDto> = messages
+        .iter()
+        .filter(|m| m.role.to_lowercase() != "system")
+        .collect();
+    let count = non_sys.len();
+
+    for (i, msg) in non_sys.into_iter().enumerate() {
+        if i + 1 == count && msg.role.to_lowercase() == "user" && attachment.is_some() {
+            let att = attachment.unwrap();
+            let mut formatted_content = String::new();
+            formatted_content.push_str(&format!(
+                "[ATTACHED FILE: {} | Type: {} | {}]\n",
+                att.filename,
+                att.file_type.as_deref().unwrap_or("FILE"),
+                att.metadata_summary.as_deref().unwrap_or("")
+            ));
+            if let Some(ref text) = att.extracted_text {
+                formatted_content.push_str("--- BEGIN ATTACHED CONTENT ---\n");
+                formatted_content.push_str(text);
+                if !text.ends_with('\n') {
+                    formatted_content.push('\n');
+                }
+                formatted_content.push_str("--- END ATTACHED CONTENT ---\n\n");
+            }
+            if msg.content.trim().is_empty() {
+                formatted_content.push_str(&format!(
+                    "Please analyze the attached {} (`{}`) and provide a detailed explanation of its contents and key insights.",
+                    att.file_type.as_deref().unwrap_or("file").to_lowercase(),
+                    att.filename
+                ));
+            } else {
+                formatted_content.push_str(&msg.content);
+            }
+
+            prompt.push_str(&format!(
+                "<|im_start|>{}\n{}<|im_end|>\n",
+                msg.role, formatted_content
+            ));
+        } else {
             prompt.push_str(&format!(
                 "<|im_start|>{}\n{}<|im_end|>\n",
                 msg.role, msg.content
@@ -405,7 +541,31 @@ async fn handle_chat_completions(
         (inner.engine.clone(), inner.model_name.clone())
     };
 
-    let prompt = format_messages_to_prompt(&payload.messages);
+    let mut attachment = payload.attachment.clone();
+    if let Some(ref mut att) = attachment {
+        if att.extracted_text.is_none() {
+            if let Some(ref data) = att.data {
+                let filename = att.filename.clone();
+                let data = data.clone();
+                let parse_res = tokio::task::spawn_blocking(move || {
+                    if data.starts_with("data:") || (data.len() > 100 && !data.contains('\n') && !data.starts_with('/')) {
+                        Attachment::from_base64(&filename, &data)
+                    } else {
+                        Attachment::from_file(&data).or_else(|_| Attachment::from_base64(&filename, &data))
+                    }
+                })
+                .await;
+
+                if let Ok(Ok(parsed)) = parse_res {
+                    att.extracted_text = Some(parsed.extracted_text);
+                    att.metadata_summary = Some(parsed.metadata_summary);
+                    att.file_type = Some(parsed.file_type.label().to_string());
+                }
+            }
+        }
+    }
+
+    let prompt = format_messages_to_prompt(&payload.messages, attachment.as_ref());
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

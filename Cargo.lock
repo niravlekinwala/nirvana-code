@@ -1390,6 +1390,7 @@ dependencies = [
  "arboard",
  "async-stream",
  "axum",
+ "base64",
  "clap",
  "crossterm",
  "dirs",
