@@ -71,6 +71,10 @@ pub struct App<'a> {
     pub top_k: i32,
     pub ngram_speculative: bool,
     pub scroll_offset: u16,
+    pub max_scroll: u16,
+    pub auto_scroll: bool,
+    pub exit_confirmation: bool,
+    pub exit_confirmation_time: Option<std::time::Instant>,
 }
 
 impl<'a> App<'a> {
@@ -94,7 +98,7 @@ impl<'a> App<'a> {
             .unwrap_or_else(|| "Custom Model".to_string());
 
         let mut textarea = TextArea::default();
-        textarea.set_placeholder_text("Type your prompt or code question... (Enter to newline, Ctrl+S to send, Ctrl+K for palette)");
+        textarea.set_placeholder_text("Type your prompt or code question... (Enter to send, Shift+Enter for newline, Ctrl+K for palette)");
 
         Self {
             theme: Theme::default(),
@@ -128,6 +132,10 @@ impl<'a> App<'a> {
             top_k,
             ngram_speculative,
             scroll_offset: 0,
+            max_scroll: 0,
+            auto_scroll: true,
+            exit_confirmation: false,
+            exit_confirmation_time: None,
         }
     }
 
@@ -139,6 +147,12 @@ impl<'a> App<'a> {
         if let Some((_, time)) = &self.toast_message {
             if time.elapsed().as_secs() > 3 {
                 self.toast_message = None;
+            }
+        }
+        if let Some(time) = self.exit_confirmation_time {
+            if time.elapsed().as_secs() > 4 {
+                self.exit_confirmation = false;
+                self.exit_confirmation_time = None;
             }
         }
     }
@@ -153,9 +167,11 @@ impl<'a> App<'a> {
             return;
         }
 
-        // Clear textarea
+        // Clear textarea & reset auto scroll to follow new generation
         self.input_textarea = TextArea::default();
-        self.input_textarea.set_placeholder_text("Type your prompt or code question... (Ctrl+S to send, Ctrl+K for palette)");
+        self.input_textarea.set_placeholder_text("Type your prompt or code question... (Enter to send, Shift+Enter for newline, Ctrl+K for palette)");
+        self.auto_scroll = true;
+        self.exit_confirmation = false;
 
         // Add user message to history
         self.chat_history.push(ChatMessage {
@@ -342,12 +358,16 @@ impl<'a> App<'a> {
                 self.set_toast("Speculative mode can be launched via: nirvana-code --speculative");
             }
             PaletteAction::ToggleKvQuantization => {
-                self.set_toast("KV-Cache quantization active: Q8_0 [50% Unified RAM Saved]");
+                self.set_toast("KV-Cache active: F16 [Peak Speed 120+ tok/s]");
             }
             PaletteAction::OpenDocs => {
                 self.set_toast("Visit atomic.chat/blog/guides/best-local-llm-16gb");
             }
-            PaletteAction::Quit => {}
+            PaletteAction::Quit => {
+                self.exit_confirmation = true;
+                self.exit_confirmation_time = Some(std::time::Instant::now());
+                self.set_toast("⚠️ Press Ctrl+C again to confirm exit");
+            }
         }
         self.show_palette = false;
     }

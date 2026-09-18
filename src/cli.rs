@@ -20,8 +20,8 @@ pub struct Cli {
     #[arg(
         long = "kv-type",
         global = true,
-        default_value = "auto",
-        help = "KV-Cache quantization format [auto, q8_0, q4_0, f16]"
+        default_value = "f16",
+        help = "KV-Cache quantization format [f16, q8_0, q4_0, auto]"
     )]
     pub kv_type: String,
 

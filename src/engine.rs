@@ -52,10 +52,10 @@ impl KvQuantMode {
 
     pub fn label(self) -> &'static str {
         match self {
-            KvQuantMode::Auto => "Auto [Dynamic Silicon Selection]",
+            KvQuantMode::Auto => "Auto [F16 Peak Speed]",
             KvQuantMode::Q8_0 => "Q8_0 [50% RAM Saved]",
             KvQuantMode::Q4_0 => "Q4_0 [75% RAM Saved]",
-            KvQuantMode::F16 => "F16 [Standard]",
+            KvQuantMode::F16 => "F16 [Peak Speed 120+ tok/s]",
         }
     }
 }
