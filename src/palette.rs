@@ -7,6 +7,7 @@ pub enum PaletteAction {
     CopyLastResponse,
     CopyFullConversation,
     CopyCodeSnippet(usize),
+    ToggleSidebar,
     ToggleSpeculative,
     ToggleKvQuantization,
     OpenDocs,
@@ -33,6 +34,13 @@ impl PaletteManager {
             subtitle: "Wipe KV cache context and restart from fresh silicon state".to_string(),
             category: "Controls",
             action: PaletteAction::ClearHistory,
+        });
+
+        items.push(PaletteItem {
+            title: "Toggle Sidebar (Full Workspace)".to_string(),
+            subtitle: "Show or hide the left hardware & templates sidebar [Ctrl+B]".to_string(),
+            category: "View",
+            action: PaletteAction::ToggleSidebar,
         });
 
         items.push(PaletteItem {

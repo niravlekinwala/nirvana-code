@@ -166,4 +166,28 @@ pub enum Commands {
         )]
         socket: Option<PathBuf>,
     },
+
+    #[command(about = "Start Nirvana Code Web UI server and launch in browser")]
+    Web {
+        #[arg(
+            short = 'p',
+            long = "port",
+            default_value = "8080",
+            help = "HTTP port to bind to"
+        )]
+        port: u16,
+
+        #[arg(
+            long = "host",
+            default_value = "127.0.0.1",
+            help = "Host address to bind to"
+        )]
+        host: String,
+
+        #[arg(
+            long = "no-open",
+            help = "Do not automatically open the browser"
+        )]
+        no_open: bool,
+    },
 }
