@@ -77,6 +77,8 @@ pub struct App<'a> {
     pub exit_confirmation: bool,
     pub exit_confirmation_time: Option<std::time::Instant>,
     pub show_sidebar: bool,
+    pub show_model_picker: bool,
+    pub model_picker_index: usize,
 }
 
 impl<'a> App<'a> {
@@ -139,6 +141,8 @@ impl<'a> App<'a> {
             exit_confirmation: false,
             exit_confirmation_time: None,
             show_sidebar: true,
+            show_model_picker: false,
+            model_picker_index: 0,
         }
     }
 
@@ -187,19 +191,15 @@ impl<'a> App<'a> {
                         if let Some(path) = ModelManager::resolve_model_path(Some(Path::new(&target))) {
                             let _ = self.switch_model(path);
                         } else {
-                            self.set_toast(&format!("❌ Model '{}' not found. Press Ctrl+P to see installed models.", target));
+                            self.set_toast(&format!("❌ Model '{}' not found. Type /model to see list.", target));
                         }
                     } else {
-                        self.show_palette = true;
-                        self.palette_query = "Model:".to_string();
-                        self.palette_index = 0;
+                        self.open_model_picker();
                     }
                     return;
                 }
                 "/models" => {
-                    self.show_palette = true;
-                    self.palette_query = "Model:".to_string();
-                    self.palette_index = 0;
+                    self.open_model_picker();
                     return;
                 }
                 "/sidebar" => {
@@ -492,5 +492,35 @@ impl<'a> App<'a> {
             }
         }
         self.show_palette = false;
+    }
+
+    pub fn open_model_picker(&mut self) {
+        self.installed_models = ModelManager::list_installed();
+        if let Some(idx) = self.installed_models.iter().position(|(p, _, _)| *p == self.model_path) {
+            self.model_picker_index = idx;
+        } else {
+            self.model_picker_index = 0;
+        }
+        self.show_model_picker = true;
+
+        // Post formatted list into conversation history as well
+        let mut list_msg = String::from("⚡ Available Apple Silicon Models:\n\n");
+        for (i, (path, name, size)) in self.installed_models.iter().enumerate() {
+            let is_active = *path == self.model_path;
+            let size_mb = size / (1024 * 1024);
+            let active_str = if is_active { "  ● [ACTIVE]" } else { "" };
+            list_msg.push_str(&format!("  [{}] {} ({} MB){}\n", i + 1, name, size_mb, active_str));
+        }
+        list_msg.push_str("\nSelect in the popup dialog above, or type /model <1..N|name>");
+
+        self.chat_history.push(ChatMessage {
+            role: "system".to_string(),
+            content: list_msg,
+            ttft_ms: None,
+            tps: None,
+            tokens: None,
+            prefix_reused: None,
+            prefix_hit: false,
+        });
     }
 }

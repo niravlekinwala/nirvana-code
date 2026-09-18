@@ -37,6 +37,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_command_palette(f, app, size);
     }
 
+    // Model picker modal popup
+    if app.show_model_picker {
+        draw_model_picker_modal(f, app, size);
+    }
+
     // Exit confirmation modal popup
     if app.exit_confirmation {
         draw_exit_confirmation_modal(f, app, size);
@@ -613,6 +618,127 @@ fn draw_exit_confirmation_modal(f: &mut Frame, app: &App, area: Rect) {
 
     let p = Paragraph::new(content).block(modal_block);
     f.render_widget(p, popup_rect);
+}
+
+fn draw_model_picker_modal(f: &mut Frame, app: &App, area: Rect) {
+    let popup_width = 76.min(area.width.saturating_sub(4));
+    let num_models = app.installed_models.len();
+    let popup_height = ((num_models * 3 + 5) as u16)
+        .min(area.height.saturating_sub(4))
+        .max(8);
+    let popup_x = (area.width.saturating_sub(popup_width)) / 2;
+    let popup_y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_rect = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_rect);
+
+    let modal_block = Block::default()
+        .title(" ⚡ SWITCH ACTIVE MODEL (Apple Silicon Metal GPU) ")
+        .title_style(app.theme.title_style())
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(app.theme.neon_cyan))
+        .style(Style::default().bg(app.theme.bg_card));
+
+    let inner_area = modal_block.inner(popup_rect);
+    f.render_widget(modal_block, popup_rect);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(4), Constraint::Length(1)])
+        .split(inner_area);
+
+    let mut list_items = Vec::new();
+
+    for (idx, (path, name, size)) in app.installed_models.iter().enumerate() {
+        let is_selected = idx == app.model_picker_index;
+        let is_active = *path == app.model_path;
+        let size_mb = size / (1024 * 1024);
+
+        let prefix = if is_selected { "▶ " } else { "  " };
+        let num_badge = format!("[{}] ", idx + 1);
+
+        let active_badge = if is_active {
+            Span::styled(
+                " ● ACTIVE ",
+                Style::default()
+                    .fg(app.theme.bg_dark)
+                    .bg(app.theme.neon_green)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(" ○ Available ", Style::default().fg(app.theme.text_dim))
+        };
+
+        let title_style = if is_selected {
+            Style::default()
+                .fg(app.theme.neon_cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.theme.text_bright)
+        };
+
+        list_items.push(ListItem::new(vec![
+            Line::from(vec![
+                Span::styled(
+                    prefix,
+                    Style::default()
+                        .fg(app.theme.neon_cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    num_badge,
+                    Style::default()
+                        .fg(app.theme.neon_amber)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(name, title_style),
+                Span::raw("  "),
+                active_badge,
+            ]),
+            Line::from(vec![
+                Span::raw("     "),
+                Span::styled(
+                    format!("{} MB  •  {}", size_mb, path.display()),
+                    Style::default().fg(app.theme.text_muted),
+                ),
+            ]),
+            Line::from(""),
+        ]));
+    }
+
+    let items_list = List::new(list_items);
+    f.render_widget(items_list, chunks[0]);
+
+    let footer_hint = Line::from(vec![
+        Span::styled(
+            " [↑/↓] ",
+            Style::default()
+                .fg(app.theme.neon_cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Navigate  ", Style::default().fg(app.theme.text_dim)),
+        Span::styled(
+            "[1-9] ",
+            Style::default()
+                .fg(app.theme.neon_amber)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Quick Pick  ", Style::default().fg(app.theme.text_dim)),
+        Span::styled(
+            "[Enter] ",
+            Style::default()
+                .fg(app.theme.neon_green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Switch  ", Style::default().fg(app.theme.text_dim)),
+        Span::styled("[Esc] ", Style::default().fg(app.theme.text_muted)),
+        Span::styled("Close", Style::default().fg(app.theme.text_dim)),
+    ]);
+    f.render_widget(
+        Paragraph::new(footer_hint).alignment(Alignment::Center),
+        chunks[1],
+    );
 }
 
 fn calculate_visual_lines(lines: &[Line], width: usize) -> usize {

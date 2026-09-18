@@ -586,6 +586,47 @@ fn run_app_loop(
                             }
                         }
 
+                        // 1b. Model Picker Modal intercept
+                        if app.show_model_picker {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    app.show_model_picker = false;
+                                }
+                                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    app.show_model_picker = false;
+                                }
+                                KeyCode::Up => {
+                                    if app.model_picker_index > 0 {
+                                        app.model_picker_index -= 1;
+                                    }
+                                }
+                                KeyCode::Down => {
+                                    if !app.installed_models.is_empty() && app.model_picker_index + 1 < app.installed_models.len() {
+                                        app.model_picker_index += 1;
+                                    }
+                                }
+                                KeyCode::Enter => {
+                                    if let Some((path, _, _)) = app.installed_models.get(app.model_picker_index) {
+                                        let p = path.clone();
+                                        let _ = app.switch_model(p);
+                                    }
+                                    app.show_model_picker = false;
+                                }
+                                KeyCode::Char(c) => {
+                                    if let Some(digit) = c.to_digit(10) {
+                                        let idx = digit as usize;
+                                        if idx >= 1 && idx <= app.installed_models.len() {
+                                            let path = app.installed_models[idx - 1].0.clone();
+                                            let _ = app.switch_model(path);
+                                            app.show_model_picker = false;
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+
                         // 2. Command Palette Interaction
                         if app.show_palette {
                             match key.code {
@@ -657,9 +698,7 @@ fn run_app_loop(
                                     continue;
                                 }
                                 KeyCode::Char('p') => {
-                                    app.show_palette = true;
-                                    app.palette_query = "Model:".to_string();
-                                    app.palette_index = 0;
+                                    app.open_model_picker();
                                     continue;
                                 }
                                 KeyCode::Char('s') => {

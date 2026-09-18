@@ -218,21 +218,33 @@ impl ModelManager {
     }
 
     pub fn resolve_model_path(explicit_path: Option<&Path>) -> Option<PathBuf> {
-        // 1. Explicit CLI argument (path or catalog ID / name)
+        // 1. Explicit CLI argument (path, catalog ID, substring, or index number)
         if let Some(path) = explicit_path {
             if path.exists() {
                 return Some(path.to_path_buf());
             }
             let target = path.to_string_lossy();
-            for (p, name, _) in Self::list_installed() {
-                if name == target.as_ref() || name.to_lowercase().contains(&target.to_lowercase()) {
-                    return Some(p);
+            let installed = Self::list_installed();
+
+            // 1a. 1-based number selection (e.g. /model 1, /model 2)
+            if let Ok(idx) = target.trim().parse::<usize>() {
+                if idx >= 1 && idx <= installed.len() {
+                    return Some(installed[idx - 1].0.clone());
                 }
             }
+
+            // 1b. Exact or substring match
+            for (p, name, _) in &installed {
+                if name == target.as_ref() || name.to_lowercase().contains(&target.to_lowercase()) {
+                    return Some(p.clone());
+                }
+            }
+
+            // 1c. Catalog ID match
             if let Some(meta) = MODEL_CATALOG.iter().find(|m| m.id == target.as_ref()) {
-                for (p, name, _) in Self::list_installed() {
-                    if name == meta.filename {
-                        return Some(p);
+                for (p, name, _) in &installed {
+                    if name == &meta.filename {
+                        return Some(p.clone());
                     }
                 }
             }
