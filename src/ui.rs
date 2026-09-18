@@ -132,13 +132,17 @@ fn draw_header_hud(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_main_body(f: &mut Frame, app: &mut App, area: Rect) {
-    let body_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(34), Constraint::Min(40)])
-        .split(area);
+    if app.show_sidebar {
+        let body_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(34), Constraint::Min(40)])
+            .split(area);
 
-    draw_sidebar(f, app, body_chunks[0]);
-    draw_content_pane(f, app, body_chunks[1]);
+        draw_sidebar(f, app, body_chunks[0]);
+        draw_content_pane(f, app, body_chunks[1]);
+    } else {
+        draw_content_pane(f, app, area);
+    }
 }
 
 fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {

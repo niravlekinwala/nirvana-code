@@ -3,7 +3,7 @@ use axum::{
     extract::State,
     response::{
         sse::{Event, KeepAlive, Sse},
-        IntoResponse, Response,
+        Html, IntoResponse, Response,
     },
     routing::{get, post},
     Json, Router,
@@ -132,10 +132,16 @@ pub struct ChunkDelta {
 
 pub fn create_router(state: ServerState) -> Router {
     Router::new()
+        .route("/", get(handle_index))
+        .route("/index.html", get(handle_index))
         .route("/v1/models", get(handle_models))
         .route("/v1/chat/completions", post(handle_chat_completions))
         .layer(CorsLayer::permissive())
         .with_state(state)
+}
+
+async fn handle_index() -> Html<&'static str> {
+    Html(include_str!("web/index.html"))
 }
 
 async fn handle_models(State(state): State<ServerState>) -> Json<ModelListResponse> {
@@ -347,12 +353,12 @@ pub async fn run_server(
 
     let app = create_router(state);
 
-    println!("\n⚡ [NIRVANA CODE] OpenAI-Compatible Local API Server & Unix Domain Socket");
+    println!("\n⚡ [NIRVANA CODE] Web UI & OpenAI-Compatible Local API Server");
     println!("   Platform:        Apple Silicon Metal 3 Unified LPDDR5");
     println!("   Model:           {}", model_name);
-    println!("   HTTP Endpoint:   http://{}:{}/v1", host, port);
-    println!("   Chat URL:        http://{}:{}/v1/chat/completions", host, port);
-    println!("   Models URL:      http://{}:{}/v1/models", host, port);
+    println!("   Web Interface:   http://{}:{}", host, port);
+    println!("   Chat API URL:    http://{}:{}/v1/chat/completions", host, port);
+    println!("   Models API URL:  http://{}:{}/v1/models", host, port);
 
     // If Unix socket is configured
     if let Some(ref sock) = socket_path {

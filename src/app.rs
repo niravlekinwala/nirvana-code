@@ -75,6 +75,7 @@ pub struct App<'a> {
     pub auto_scroll: bool,
     pub exit_confirmation: bool,
     pub exit_confirmation_time: Option<std::time::Instant>,
+    pub show_sidebar: bool,
 }
 
 impl<'a> App<'a> {
@@ -136,6 +137,7 @@ impl<'a> App<'a> {
             auto_scroll: true,
             exit_confirmation: false,
             exit_confirmation_time: None,
+            show_sidebar: true,
         }
     }
 
@@ -379,6 +381,14 @@ impl<'a> App<'a> {
             }
             PaletteAction::CopyFullConversation => {
                 self.copy_full_conversation();
+            }
+            PaletteAction::ToggleSidebar => {
+                self.show_sidebar = !self.show_sidebar;
+                self.set_toast(if self.show_sidebar {
+                    "✔ Sidebar visible"
+                } else {
+                    "✔ Sidebar hidden (Full Workspace)"
+                });
             }
             PaletteAction::CopyCodeSnippet(_) => {
                 self.copy_first_code_snippet();

@@ -62,6 +62,10 @@ async fn main() -> Result<()> {
             cmd_serve(&cli, *port, host, socket.as_deref()).await?;
             return Ok(());
         }
+        Some(Commands::Web { port, host, no_open }) => {
+            cmd_web(&cli, *port, host, !*no_open).await?;
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -413,6 +417,59 @@ async fn cmd_serve(cli: &Cli, port: u16, host: &str, socket: Option<&Path>) -> R
     Ok(())
 }
 
+async fn cmd_web(cli: &Cli, port: u16, host: &str, open_browser: bool) -> Result<()> {
+    let model_path = match ModelManager::resolve_model_path(cli.model.as_deref()) {
+        Some(p) => p,
+        None => {
+            eprintln!("\n❌ No GGUF model found!");
+            eprintln!("Run: nirvana-code download qwen-1.5b\n");
+            return Ok(());
+        }
+    };
+
+    let kv_mode = match cli.kv_type.to_lowercase().as_str() {
+        "q4_0" => KvQuantMode::Q4_0,
+        "f16" => KvQuantMode::F16,
+        "q8_0" => KvQuantMode::Q8_0,
+        _ => KvQuantMode::Auto,
+    };
+
+    let engine = Arc::new(ModelEngine::load(
+        &model_path,
+        cli.gpu_layers,
+        !cli.no_mlock,
+        kv_mode,
+        cli.ctx_size,
+    )?);
+
+    let model_name = model_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "nirvana-code".to_string());
+
+    if open_browser {
+        let host_clone = host.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("open")
+                .arg(format!("http://{}:{}", host_clone, port))
+                .spawn();
+            #[cfg(target_os = "linux")]
+            let _ = std::process::Command::new("xdg-open")
+                .arg(format!("http://{}:{}", host_clone, port))
+                .spawn();
+            #[cfg(target_os = "windows")]
+            let _ = std::process::Command::new("cmd")
+                .args(["/C", "start", &format!("http://{}:{}", host_clone, port)])
+                .spawn();
+        });
+    }
+
+    server::run_server(engine, model_name, host, port, None).await?;
+    Ok(())
+}
+
 fn run_tui(
     engine: Arc<ModelEngine>,
     model_path: PathBuf,
@@ -566,6 +623,15 @@ fn run_app_loop(
                                         app.exit_confirmation_time = Some(Instant::now());
                                         app.set_toast("⚠️ Press Ctrl+C again to confirm exit");
                                     }
+                                    continue;
+                                }
+                                KeyCode::Char('b') => {
+                                    app.show_sidebar = !app.show_sidebar;
+                                    app.set_toast(if app.show_sidebar {
+                                        "✔ Sidebar visible"
+                                    } else {
+                                        "✔ Sidebar hidden (Full Workspace)"
+                                    });
                                     continue;
                                 }
                                 KeyCode::Char('s') => {
