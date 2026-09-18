@@ -1,5 +1,5 @@
 use crate::clipboard::ClipboardHelper;
-use crate::engine::{ModelEngine, StreamEvent};
+use crate::engine::{GenerationConfig, ModelEngine, StreamEvent};
 use crate::hardware::SiliconProfile;
 use crate::model_manager::ModelManager;
 use crate::palette::{PaletteAction, PaletteItem, PaletteManager};
@@ -66,6 +66,10 @@ pub struct App<'a> {
     pub installed_models: Vec<(PathBuf, String, u64)>,
     pub max_tokens: usize,
     pub temperature: f32,
+    pub min_p: f32,
+    pub top_p: f32,
+    pub top_k: i32,
+    pub ngram_speculative: bool,
     pub scroll_offset: u16,
 }
 
@@ -75,6 +79,10 @@ impl<'a> App<'a> {
         model_path: PathBuf,
         max_tokens: usize,
         temperature: f32,
+        min_p: f32,
+        top_p: f32,
+        top_k: i32,
+        ngram_speculative: bool,
     ) -> Self {
         let hardware = SiliconProfile::detect();
         let installed_models = ModelManager::list_installed();
@@ -115,6 +123,10 @@ impl<'a> App<'a> {
             installed_models,
             max_tokens,
             temperature,
+            min_p,
+            top_p,
+            top_k,
+            ngram_speculative,
             scroll_offset: 0,
         }
     }
@@ -193,15 +205,20 @@ impl<'a> App<'a> {
         self.cancel_token = Some(cancel_token.clone());
 
         let engine = self.engine.clone();
-        let max_tokens = self.max_tokens;
-        let temperature = self.temperature;
+        let config = GenerationConfig {
+            max_tokens: self.max_tokens,
+            temperature: self.temperature,
+            min_p: self.min_p,
+            top_p: self.top_p,
+            top_k: self.top_k,
+            use_ngram_speculative: self.ngram_speculative,
+        };
 
         // Spawn inference generation on blocking background thread
         tokio::task::spawn_blocking(move || {
-            let _ = engine.stream_generate(
+            let _ = engine.stream_generate_with_config(
                 &full_prompt,
-                max_tokens,
-                temperature,
+                &config,
                 cancel_token,
                 tx,
             );

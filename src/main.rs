@@ -5,6 +5,7 @@ mod engine;
 mod hardware;
 mod model_manager;
 mod palette;
+mod server;
 mod speculative;
 mod syntax;
 mod templates;
@@ -20,12 +21,13 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use engine::{KvQuantMode, ModelEngine, StreamEvent};
+use engine::{GenerationConfig, KvQuantMode, ModelEngine, StreamEvent};
 use model_manager::{ModelManager, MODEL_CATALOG};
 use palette::PaletteManager;
 use ratatui::{backend::CrosstermBackend, Terminal};
+use speculative::SpeculativeEngine;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -53,6 +55,10 @@ async fn main() -> Result<()> {
             cmd_single_shot(&cli, prompt, preset).await?;
             return Ok(());
         }
+        Some(Commands::Serve { port, host, socket }) => {
+            cmd_serve(&cli, *port, host, socket.as_deref()).await?;
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -73,7 +79,8 @@ async fn main() -> Result<()> {
     let kv_mode = match cli.kv_type.to_lowercase().as_str() {
         "q4_0" => KvQuantMode::Q4_0,
         "f16" => KvQuantMode::F16,
-        _ => KvQuantMode::Q8_0,
+        "q8_0" => KvQuantMode::Q8_0,
+        _ => KvQuantMode::Auto,
     };
 
     let use_mlock = !cli.no_mlock;
@@ -83,7 +90,11 @@ async fn main() -> Result<()> {
     println!("   KV-Cache:    {}", kv_mode.label());
     println!("   MLock:       {}", if use_mlock { "Enabled (LPDDR5 RAM Pinned)" } else { "Disabled" });
     println!("   Metal GPU:   {} layers offloaded", cli.gpu_layers);
-    println!("   Context:     {} tokens\n", cli.ctx_size);
+    println!("   Context:     {} tokens", cli.ctx_size);
+    if cli.ngram_speculative {
+        println!("   Speculation: Prompt Lookup Decoding (N-gram matching) ENABLED");
+    }
+    println!();
 
     let engine = Arc::new(ModelEngine::load(
         &model_path,
@@ -93,7 +104,16 @@ async fn main() -> Result<()> {
         cli.ctx_size,
     )?);
 
-    run_tui(engine, model_path, cli.max_tokens, cli.temperature)?;
+    run_tui(
+        engine,
+        model_path,
+        cli.max_tokens,
+        cli.temperature,
+        cli.min_p,
+        cli.top_p,
+        cli.top_k,
+        cli.ngram_speculative,
+    )?;
     Ok(())
 }
 
@@ -134,13 +154,18 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize) -> Result<()> {
     let kv_mode = match cli.kv_type.to_lowercase().as_str() {
         "q4_0" => KvQuantMode::Q4_0,
         "f16" => KvQuantMode::F16,
-        _ => KvQuantMode::Q8_0,
+        "q8_0" => KvQuantMode::Q8_0,
+        _ => KvQuantMode::Auto,
     };
 
     println!("\n⚡ Running Silicon Core Benchmark on Apple Silicon...");
-    println!("   Model:    {}", model_path.display());
-    println!("   KV-Cache: {}", kv_mode.label());
-    println!("   Memory:   mlock pinned in Unified RAM\n");
+    println!("   Model:       {}", model_path.display());
+    println!("   KV-Cache:    {}", kv_mode.label());
+    println!("   Memory:      mlock pinned in Unified RAM");
+    if cli.ngram_speculative {
+        println!("   Speculation: Prompt Lookup Decoding (N-gram matching) ENABLED");
+    }
+    println!();
 
     let engine = Arc::new(ModelEngine::load(&model_path, cli.gpu_layers, true, kv_mode, cli.ctx_size)?);
 
@@ -155,14 +180,24 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize) -> Result<()> {
         system_prompt
     );
 
+    let config = GenerationConfig {
+        max_tokens: num_tokens,
+        temperature: 0.0,
+        min_p: cli.min_p,
+        top_p: cli.top_p,
+        top_k: cli.top_k,
+        use_ngram_speculative: cli.ngram_speculative,
+    };
+
     // Turn 1: Cold Cache Prefill
     println!("🚀 [Turn 1] Cold Cache Prefill (Evaluating system + user prompt from scratch)...");
     let (tx1, mut rx1) = unbounded_channel();
     let cancel1 = Arc::new(AtomicBool::new(false));
 
     let eng1 = engine.clone();
+    let cfg1 = config.clone();
     tokio::task::spawn_blocking(move || {
-        let _ = eng1.stream_generate(&test_prompt_1, num_tokens, 0.0, cancel1, tx1);
+        let _ = eng1.stream_generate_with_config(&test_prompt_1, &cfg1, cancel1, tx1);
     });
 
     let mut ttft_cold = 0;
@@ -182,8 +217,9 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize) -> Result<()> {
     let cancel2 = Arc::new(AtomicBool::new(false));
 
     let eng2 = engine.clone();
+    let cfg2 = config.clone();
     tokio::task::spawn_blocking(move || {
-        let _ = eng2.stream_generate(&test_prompt_2, num_tokens, 0.0, cancel2, tx2);
+        let _ = eng2.stream_generate_with_config(&test_prompt_2, &cfg2, cancel2, tx2);
     });
 
     let mut ttft_warm = 0;
@@ -207,7 +243,7 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize) -> Result<()> {
 
     println!("🏆 BENCHMARK RESULTS:");
     println!("   Prefix Caching TTFT Reduction: {:.1}% latency reduction!", speedup);
-    println!("   KV-Cache Quantization:         Q8_0 halved attention VRAM consumption.");
+    println!("   KV-Cache Quantization:         {} active.", engine.kv_mode.label());
     println!("   Memory Locking (mlock):        Zero virtual memory page faults.\n");
 
     Ok(())
@@ -224,21 +260,90 @@ async fn cmd_single_shot(cli: &Cli, prompt: &str, preset: &str) -> Result<()> {
 
     let full_prompt = tmpl.build_full_context(prompt);
 
+    // If draft model is supplied or speculative is requested
+    if cli.speculative || cli.draft_model.is_some() {
+        let draft_path = match ModelManager::resolve_model_path(cli.draft_model.as_deref()) {
+            Some(p) => p,
+            None => {
+                ModelManager::resolve_model_path(Some(Path::new("qwen-0.5b")))
+                    .or_else(|| ModelManager::resolve_model_path(Some(Path::new("qwen-1.5b"))))
+                    .context("No draft model found for speculative decoding. Run 'nirvana-code download qwen-0.5b'")?
+            }
+        };
+
+        println!("⚡ [SPECULATIVE DECODING] Dual-Engine Metal Generation");
+        println!("   Target Model: {}", model_path.display());
+        println!("   Draft Model:  {}\n", draft_path.display());
+
+        let engine = SpeculativeEngine::load(
+            &model_path,
+            &draft_path,
+            cli.gpu_layers,
+            !cli.no_mlock,
+            cli.ctx_size,
+            4,
+        )?;
+
+        let (tx, mut rx) = unbounded_channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let max_tokens = cli.max_tokens;
+        let temperature = cli.temperature;
+
+        tokio::task::spawn_blocking(move || {
+            let _ = engine.stream_generate(&full_prompt, max_tokens, temperature, cancel, tx);
+        });
+
+        use std::io::Write;
+        while let Some(event) = rx.recv().await {
+            match event {
+                StreamEvent::Token(tok) => {
+                    print!("{}", tok);
+                    let _ = io::stdout().flush();
+                }
+                StreamEvent::Stats {
+                    ttft_ms,
+                    tokens_per_sec,
+                    total_tokens,
+                    kv_type,
+                    ..
+                } => {
+                    println!(
+                        "\n\n[Stats: TTFT: {}ms | {:.1} tok/s | {} tokens | {}]",
+                        ttft_ms, tokens_per_sec, total_tokens, kv_type
+                    );
+                }
+                StreamEvent::Done => break,
+                StreamEvent::Error(err) => {
+                    eprintln!("\nError: {}", err);
+                    break;
+                }
+            }
+        }
+        return Ok(());
+    }
+
     let kv_mode = match cli.kv_type.to_lowercase().as_str() {
         "q4_0" => KvQuantMode::Q4_0,
         "f16" => KvQuantMode::F16,
-        _ => KvQuantMode::Q8_0,
+        "q8_0" => KvQuantMode::Q8_0,
+        _ => KvQuantMode::Auto,
     };
 
     let engine = ModelEngine::load(&model_path, cli.gpu_layers, !cli.no_mlock, kv_mode, cli.ctx_size)?;
 
     let (tx, mut rx) = unbounded_channel();
     let cancel = Arc::new(AtomicBool::new(false));
-    let max_tokens = cli.max_tokens;
-    let temperature = cli.temperature;
+    let config = GenerationConfig {
+        max_tokens: cli.max_tokens,
+        temperature: cli.temperature,
+        min_p: cli.min_p,
+        top_p: cli.top_p,
+        top_k: cli.top_k,
+        use_ngram_speculative: cli.ngram_speculative,
+    };
 
     tokio::task::spawn_blocking(move || {
-        let _ = engine.stream_generate(&full_prompt, max_tokens, temperature, cancel, tx);
+        let _ = engine.stream_generate_with_config(&full_prompt, &config, cancel, tx);
     });
 
     use std::io::Write;
@@ -271,11 +376,49 @@ async fn cmd_single_shot(cli: &Cli, prompt: &str, preset: &str) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_serve(cli: &Cli, port: u16, host: &str, socket: Option<&Path>) -> Result<()> {
+    let model_path = match ModelManager::resolve_model_path(cli.model.as_deref()) {
+        Some(p) => p,
+        None => {
+            eprintln!("\n❌ No GGUF model found!");
+            eprintln!("Run: nirvana-code download qwen-1.5b\n");
+            return Ok(());
+        }
+    };
+
+    let kv_mode = match cli.kv_type.to_lowercase().as_str() {
+        "q4_0" => KvQuantMode::Q4_0,
+        "f16" => KvQuantMode::F16,
+        "q8_0" => KvQuantMode::Q8_0,
+        _ => KvQuantMode::Auto,
+    };
+
+    let engine = Arc::new(ModelEngine::load(
+        &model_path,
+        cli.gpu_layers,
+        !cli.no_mlock,
+        kv_mode,
+        cli.ctx_size,
+    )?);
+
+    let model_name = model_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "nirvana-code".to_string());
+
+    server::run_server(engine, model_name, host, port, socket.map(|p| p.to_path_buf())).await?;
+    Ok(())
+}
+
 fn run_tui(
     engine: Arc<ModelEngine>,
     model_path: PathBuf,
     max_tokens: usize,
     temperature: f32,
+    min_p: f32,
+    top_p: f32,
+    top_k: i32,
+    ngram_speculative: bool,
 ) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -283,7 +426,16 @@ fn run_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(engine, model_path, max_tokens, temperature);
+    let mut app = App::new(
+        engine,
+        model_path,
+        max_tokens,
+        temperature,
+        min_p,
+        top_p,
+        top_k,
+        ngram_speculative,
+    );
 
     let last_tick = Instant::now();
     let tick_rate = Duration::from_millis(16); // 60 FPS

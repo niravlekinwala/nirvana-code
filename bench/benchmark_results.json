@@ -3,41 +3,41 @@
     "engine": "Nirvana Code (F16)",
     "kv_type": "f16",
     "cold_ttft_ms": 85.0,
-    "warm_ttft_ms": 42.0,
-    "cold_tps": 117.5,
-    "warm_tps": 106.5,
-    "speedup_pct": 50.6,
+    "warm_ttft_ms": 36.0,
+    "cold_tps": 119.1,
+    "warm_tps": 119.1,
+    "speedup_pct": 57.6,
     "kv_cache_type": "F16 (Standard)",
     "kv_cache_size_mb": 119.0,
     "ipc_overhead_ms": 0.0,
     "memory_locking": "Active (mlock)",
-    "raw_output": "\n\u26a1 Running Silicon Core Benchmark on Apple Silicon...\n   Model:    /Users/nirav/.promptcraft/models/qwen2.5-1.5b-instruct-q4_k_m.gguf\n   KV-Cache: F16 [Standard]\n   Memory:   mlock pinned in Unified RAM\n\n\ud83d\ude80 [Turn 1] Cold Cache Prefill (Evaluating system + user prompt from scratch)...\n   Cold TTFT:    85 ms\n   Decode Speed: 117.5 tokens/sec\n\n\u26a1 [Turn 2] Warm Prefix Cache Reuse (Reusing system prompt KV state)...\n   Warm TTFT:    42 ms (Prefix tokens reused: 27)\n   Decode Speed: 106.5 tokens/sec\n\n\ud83c\udfc6 BENCHMARK RESULTS:\n   Prefix Caching TTFT Reduction: 50.6% latency reduction!\n   KV-Cache Quantization:         Q8_0 halved attention VRAM consumption.\n   Memory Locking (mlock):        Zero virtual memory page faults.\n\n"
+    "raw_output": "\n\u26a1 Running Silicon Core Benchmark on Apple Silicon...\n   Model:       /Users/nirav/.promptcraft/models/qwen2.5-1.5b-instruct-q4_k_m.gguf\n   KV-Cache:    F16 [Standard]\n   Memory:      mlock pinned in Unified RAM\n\n\ud83d\ude80 [Turn 1] Cold Cache Prefill (Evaluating system + user prompt from scratch)...\n   Cold TTFT:    85 ms\n   Decode Speed: 119.1 tokens/sec\n\n\u26a1 [Turn 2] Warm Prefix Cache Reuse (Reusing system prompt KV state)...\n   Warm TTFT:    36 ms (Prefix tokens reused: 27)\n   Decode Speed: 119.1 tokens/sec\n\n\ud83c\udfc6 BENCHMARK RESULTS:\n   Prefix Caching TTFT Reduction: 57.6% latency reduction!\n   KV-Cache Quantization:         F16 [Standard] active.\n   Memory Locking (mlock):        Zero virtual memory page faults.\n\n"
   },
   "nirvana_q8": {
     "engine": "Nirvana Code (Q8_0)",
     "kv_type": "q8_0",
     "cold_ttft_ms": 83.0,
-    "warm_ttft_ms": 44.0,
-    "cold_tps": 107.9,
-    "warm_tps": 102.0,
-    "speedup_pct": 47.0,
+    "warm_ttft_ms": 38.0,
+    "cold_tps": 107.0,
+    "warm_tps": 106.7,
+    "speedup_pct": 54.2,
     "kv_cache_type": "Q8_0 (50% RAM Saved)",
     "kv_cache_size_mb": 59.5,
     "ipc_overhead_ms": 0.0,
     "memory_locking": "Active (mlock)",
-    "raw_output": "\n\u26a1 Running Silicon Core Benchmark on Apple Silicon...\n   Model:    /Users/nirav/.promptcraft/models/qwen2.5-1.5b-instruct-q4_k_m.gguf\n   KV-Cache: Q8_0 [50% RAM Saved]\n   Memory:   mlock pinned in Unified RAM\n\n\ud83d\ude80 [Turn 1] Cold Cache Prefill (Evaluating system + user prompt from scratch)...\n   Cold TTFT:    83 ms\n   Decode Speed: 107.9 tokens/sec\n\n\u26a1 [Turn 2] Warm Prefix Cache Reuse (Reusing system prompt KV state)...\n   Warm TTFT:    44 ms (Prefix tokens reused: 27)\n   Decode Speed: 102.0 tokens/sec\n\n\ud83c\udfc6 BENCHMARK RESULTS:\n   Prefix Caching TTFT Reduction: 47.0% latency reduction!\n   KV-Cache Quantization:         Q8_0 halved attention VRAM consumption.\n   Memory Locking (mlock):        Zero virtual memory page faults.\n\n"
+    "raw_output": "\n\u26a1 Running Silicon Core Benchmark on Apple Silicon...\n   Model:       /Users/nirav/.promptcraft/models/qwen2.5-1.5b-instruct-q4_k_m.gguf\n   KV-Cache:    Q8_0 [50% RAM Saved]\n   Memory:      mlock pinned in Unified RAM\n\n\ud83d\ude80 [Turn 1] Cold Cache Prefill (Evaluating system + user prompt from scratch)...\n   Cold TTFT:    83 ms\n   Decode Speed: 107.0 tokens/sec\n\n\u26a1 [Turn 2] Warm Prefix Cache Reuse (Reusing system prompt KV state)...\n   Warm TTFT:    38 ms (Prefix tokens reused: 27)\n   Decode Speed: 106.7 tokens/sec\n\n\ud83c\udfc6 BENCHMARK RESULTS:\n   Prefix Caching TTFT Reduction: 54.2% latency reduction!\n   KV-Cache Quantization:         Q8_0 [50% RAM Saved] active.\n   Memory Locking (mlock):        Zero virtual memory page faults.\n\n"
   },
   "ollama": {
     "engine": "Ollama 0.34.1",
-    "cold_ttft_ms": 80.40976524353027,
-    "warm_ttft_ms": 20.19500732421875,
-    "cold_tps": 121.19834890201558,
-    "warm_tps": 119.96610957404535,
-    "speedup_pct": 74.8848821246327,
+    "cold_ttft_ms": 20137.87794113159,
+    "warm_ttft_ms": 47.35898971557617,
+    "cold_tps": 118.92683398185622,
+    "warm_tps": 119.55220228232626,
+    "speedup_pct": 99.76482631459969,
     "kv_cache_type": "F16 (Default)",
     "kv_cache_size_mb": 119.0,
     "ipc_overhead_ms": 8.5,
     "memory_locking": "Disabled (mmap)",
-    "process_rss_mb": 1384.265625
+    "process_rss_mb": 1320.4375
   }
 }
