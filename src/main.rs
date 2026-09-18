@@ -413,7 +413,18 @@ async fn cmd_serve(cli: &Cli, port: u16, host: &str, socket: Option<&Path>) -> R
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "nirvana-code".to_string());
 
-    server::run_server(engine, model_name, host, port, socket.map(|p| p.to_path_buf())).await?;
+    server::run_server(
+        engine,
+        model_name,
+        model_path,
+        host,
+        port,
+        socket.map(|p| p.to_path_buf()),
+        cli.gpu_layers,
+        !cli.no_mlock,
+        kv_mode,
+        cli.ctx_size,
+    ).await?;
     Ok(())
 }
 
@@ -466,7 +477,18 @@ async fn cmd_web(cli: &Cli, port: u16, host: &str, open_browser: bool) -> Result
         });
     }
 
-    server::run_server(engine, model_name, host, port, None).await?;
+    server::run_server(
+        engine,
+        model_name,
+        model_path,
+        host,
+        port,
+        None,
+        cli.gpu_layers,
+        !cli.no_mlock,
+        kv_mode,
+        cli.ctx_size,
+    ).await?;
     Ok(())
 }
 
@@ -632,6 +654,12 @@ fn run_app_loop(
                                     } else {
                                         "✔ Sidebar hidden (Full Workspace)"
                                     });
+                                    continue;
+                                }
+                                KeyCode::Char('p') => {
+                                    app.show_palette = true;
+                                    app.palette_query = "Model:".to_string();
+                                    app.palette_index = 0;
                                     continue;
                                 }
                                 KeyCode::Char('s') => {

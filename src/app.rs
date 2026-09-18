@@ -6,7 +6,8 @@ use crate::palette::{PaletteAction, PaletteItem, PaletteManager};
 use crate::syntax::SyntaxHighlighter;
 use crate::templates::{PromptTemplate, TEMPLATES};
 use crate::theme::Theme;
-use std::path::PathBuf;
+use anyhow::Result;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
@@ -174,6 +175,48 @@ impl<'a> App<'a> {
         self.input_textarea.set_placeholder_text("Type your prompt or code question... (Enter to send, Shift+Enter for newline, Ctrl+K for palette)");
         self.auto_scroll = true;
         self.exit_confirmation = false;
+
+        // Check for slash commands (/model, /models, /clear, /sidebar)
+        if input_text.starts_with('/') {
+            let parts: Vec<&str> = input_text.split_whitespace().collect();
+            let cmd = parts[0].to_lowercase();
+            match cmd.as_str() {
+                "/model" | "/switch" | "/load" => {
+                    if parts.len() > 1 {
+                        let target = parts[1..].join(" ");
+                        if let Some(path) = ModelManager::resolve_model_path(Some(Path::new(&target))) {
+                            let _ = self.switch_model(path);
+                        } else {
+                            self.set_toast(&format!("❌ Model '{}' not found. Press Ctrl+P to see installed models.", target));
+                        }
+                    } else {
+                        self.show_palette = true;
+                        self.palette_query = "Model:".to_string();
+                        self.palette_index = 0;
+                    }
+                    return;
+                }
+                "/models" => {
+                    self.show_palette = true;
+                    self.palette_query = "Model:".to_string();
+                    self.palette_index = 0;
+                    return;
+                }
+                "/sidebar" => {
+                    self.show_sidebar = !self.show_sidebar;
+                    self.set_toast(if self.show_sidebar { "✔ Sidebar visible" } else { "✔ Sidebar hidden (Full Workspace)" });
+                    return;
+                }
+                "/clear" => {
+                    self.chat_history.clear();
+                    self.current_stream.clear();
+                    self.engine.clear_cache();
+                    self.set_toast("✔ KV Cache & conversation history cleared");
+                    return;
+                }
+                _ => {}
+            }
+        }
 
         // Add user message to history
         self.chat_history.push(ChatMessage {
@@ -359,6 +402,45 @@ impl<'a> App<'a> {
         }
     }
 
+    pub fn switch_model(&mut self, target_path: PathBuf) -> Result<()> {
+        if self.model_path == target_path {
+            self.set_toast(&format!("✔ Already using {}", self.model_name));
+            return Ok(());
+        }
+
+        let filename = target_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "model".to_string());
+
+        self.set_toast(&format!("⏳ Loading {} onto Metal GPU...", filename));
+
+        // 1. Cancel active generation & clear KV cache
+        self.cancel_generation();
+        self.engine.clear_cache();
+
+        let gpu_layers = self.engine.n_gpu_layers;
+        let use_mlock = self.engine.use_mlock;
+        let kv_mode = self.engine.kv_mode;
+        let ctx_size = self.engine.n_ctx;
+
+        match ModelEngine::load(&target_path, gpu_layers, use_mlock, kv_mode, ctx_size) {
+            Ok(new_engine) => {
+                self.engine = Arc::new(new_engine);
+                self.model_path = target_path.clone();
+                self.model_name = filename.clone();
+                self.chat_history.clear();
+                self.current_stream.clear();
+                self.set_toast(&format!("✔ Active Model: {} (Metal GPU Ready)", filename));
+                Ok(())
+            }
+            Err(e) => {
+                self.set_toast(&format!("❌ Failed to load model: {}", e));
+                Err(e)
+            }
+        }
+    }
+
     pub fn execute_palette_action(&mut self, action: PaletteAction) {
         match action {
             PaletteAction::SelectTemplate(id) => {
@@ -368,7 +450,8 @@ impl<'a> App<'a> {
                 }
             }
             PaletteAction::SelectModel(path_str) => {
-                self.set_toast(&format!("Restart with --model to load {}", path_str));
+                let path = PathBuf::from(&path_str);
+                let _ = self.switch_model(path);
             }
             PaletteAction::ClearHistory => {
                 self.chat_history.clear();

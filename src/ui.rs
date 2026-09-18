@@ -185,6 +185,11 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     mode_lines.push(Line::from(""));
     mode_lines.push(Line::from(vec![
         Span::styled("Press ", Style::default().fg(app.theme.text_muted)),
+        Span::styled("Ctrl+P", Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(" to Switch Model", Style::default().fg(app.theme.text_muted)),
+    ]));
+    mode_lines.push(Line::from(vec![
+        Span::styled("Press ", Style::default().fg(app.theme.text_muted)),
         Span::styled("Ctrl+K", Style::default().fg(app.theme.neon_amber).add_modifier(Modifier::BOLD)),
         Span::styled(" for Command Palette", Style::default().fg(app.theme.text_muted)),
     ]));
@@ -446,7 +451,7 @@ fn draw_content_pane(f: &mut Frame, app: &mut App, area: Rect) {
     let input_title = if is_generating {
         " Prompt (Generating... Press Ctrl+C to cancel) "
     } else {
-        " Prompt / Code Question (Enter to Send | Shift+Enter for Newline | Ctrl+K for Palette) "
+        " Prompt / Code Question (Enter to Send | Ctrl+P Switch Model | Ctrl+K Palette) "
     };
 
     let input_border_style = if is_generating {
@@ -477,6 +482,8 @@ fn draw_footer_status(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("Newline  ", Style::default().fg(app.theme.text_dim)),
         Span::styled("[↑/↓ or Scroll] ", Style::default().fg(app.theme.neon_green).add_modifier(Modifier::BOLD)),
         Span::styled("History  ", Style::default().fg(app.theme.text_dim)),
+        Span::styled("[Ctrl+P] ", Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD)),
+        Span::styled("Model  ", Style::default().fg(app.theme.text_dim)),
         Span::styled("[Ctrl+O] ", Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD)),
         Span::styled("Copy All  ", Style::default().fg(app.theme.text_dim)),
         Span::styled("[Ctrl+Y] ", Style::default().fg(app.theme.neon_amber).add_modifier(Modifier::BOLD)),
