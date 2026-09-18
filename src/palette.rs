@@ -1,6 +1,8 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum PaletteAction {
+    AttachFile,
+    DetachFile,
     SelectTemplate(String),
     SelectModel(String),
     ClearHistory,
@@ -29,6 +31,20 @@ impl PaletteManager {
         let mut items = Vec::new();
 
         // 1. Actions & Controls
+        items.push(PaletteItem {
+            title: "Attach File (PDF, Image, Doc, Code)".to_string(),
+            subtitle: "Attach local PDF, screenshot, doc, or code file [Ctrl+F or /attach]".to_string(),
+            category: "Input",
+            action: PaletteAction::AttachFile,
+        });
+
+        items.push(PaletteItem {
+            title: "Detach Current Attached File".to_string(),
+            subtitle: "Remove attached document/image from upcoming prompt [/detach]".to_string(),
+            category: "Input",
+            action: PaletteAction::DetachFile,
+        });
+
         items.push(PaletteItem {
             title: "Clear Session & Prefix Cache".to_string(),
             subtitle: "Wipe KV cache context and restart from fresh silicon state".to_string(),

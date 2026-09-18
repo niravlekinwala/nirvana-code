@@ -507,6 +507,139 @@
       color: #fff;
     }
 
+    /* Attachments */
+    .controls-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .attach-btn {
+      background: var(--bg-hover);
+      border: 1px solid var(--border-dim);
+      color: var(--neon-cyan);
+      border-radius: 4px;
+      padding: 4px 10px;
+      font-family: inherit;
+      font-size: 11px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      transition: all 0.15s ease;
+    }
+
+    .attach-btn:hover {
+      border-color: var(--neon-cyan);
+      box-shadow: 0 0 8px rgba(0, 240, 255, 0.3);
+      background: rgba(0, 240, 255, 0.1);
+    }
+
+    .shortcut-tip {
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+
+    .shortcut-tip kbd {
+      background: var(--bg-card);
+      border: 1px solid var(--border-dim);
+      border-radius: 3px;
+      padding: 1px 4px;
+      font-size: 10px;
+      color: var(--text-bright);
+    }
+
+    .attachment-bar {
+      margin-bottom: 8px;
+    }
+
+    .attachment-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(0, 240, 255, 0.08);
+      border: 1px solid var(--neon-cyan);
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 12px;
+      animation: fadeIn 0.2s ease;
+    }
+
+    .attachment-thumb {
+      width: 28px;
+      height: 28px;
+      border-radius: 4px;
+      background: var(--bg-card);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      font-size: 14px;
+      flex-shrink: 0;
+    }
+
+    .attachment-thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .attachment-details {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .attachment-name {
+      font-weight: 700;
+      color: var(--text-bright);
+      max-width: 320px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .attachment-meta {
+      font-size: 10px;
+      color: var(--neon-green);
+    }
+
+    .attachment-remove-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 12px;
+      padding: 2px 4px;
+      border-radius: 3px;
+      transition: all 0.15s;
+      margin-left: 4px;
+    }
+
+    .attachment-remove-btn:hover {
+      color: var(--neon-magenta);
+      background: rgba(255, 0, 128, 0.1);
+    }
+
+    .msg-attachment-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(0, 240, 255, 0.07);
+      border: 1px solid rgba(0, 240, 255, 0.3);
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 11.5px;
+      color: var(--neon-cyan);
+      margin-bottom: 8px;
+    }
+
+    .drag-active {
+      border-color: var(--neon-cyan) !important;
+      box-shadow: 0 0 16px rgba(0, 240, 255, 0.4) !important;
+      background: rgba(0, 240, 255, 0.05) !important;
+    }
+
     /* Toast */
     #toast {
       position: fixed;
@@ -718,14 +851,32 @@
 
       <!-- Input Area -->
       <div class="input-wrapper">
-        <div class="input-box">
+        <!-- Attachment Bar (hidden when no file attached) -->
+        <div class="attachment-bar" id="attachmentBar" style="display: none;">
+          <div class="attachment-pill">
+            <div class="attachment-thumb" id="attachmentThumb">📎</div>
+            <div class="attachment-details">
+              <div class="attachment-name" id="attachmentName">filename.pdf</div>
+              <div class="attachment-meta" id="attachmentMeta">Extracting...</div>
+            </div>
+            <button class="attachment-remove-btn" id="attachmentRemoveBtn" title="Remove attachment">✖</button>
+          </div>
+        </div>
+
+        <div class="input-box" id="dropZone">
           <textarea
             id="promptInput"
-            placeholder="Type your coding question or prompt... (Enter to send, Shift+Enter for newline)"
+            placeholder="Type your coding question or prompt... (Enter to send, Shift+Enter for newline, or paste screenshot / drag & drop file)"
             rows="1"
           ></textarea>
           <div class="input-controls">
-            <span>Press <strong>Enter</strong> to send, <strong>Ctrl+B</strong> to toggle sidebar</span>
+            <div class="controls-left">
+              <input type="file" id="fileInput" style="display: none;" accept="image/*,.pdf,.doc,.docx,.rtf,.txt,.rs,.py,.js,.ts,.tsx,.jsx,.go,.c,.cpp,.h,.json,.yaml,.yml,.toml,.md,.sh,.sql">
+              <button class="attach-btn" id="attachBtn" type="button" title="Attach image, PDF, doc, or code file (or paste screenshot)">
+                <span style="font-size: 13px;">📎</span> <span>Attach</span>
+              </button>
+              <span class="shortcut-tip">Press <strong>Enter</strong> to send • Paste (<kbd>⌘V</kbd>) • Drag & drop</span>
+            </div>
             <button class="send-btn" id="sendBtn">
               <span id="sendIcon">➤</span> <span id="sendLabel">Send</span>
             </button>
@@ -752,6 +903,137 @@
     const heroSplash = document.getElementById('heroSplash');
     const templateSelect = document.getElementById('templateSelect');
     const toast = document.getElementById('toast');
+
+    // Attachment State & Elements
+    let currentAttachment = null;
+    const attachmentBar = document.getElementById('attachmentBar');
+    const attachmentThumb = document.getElementById('attachmentThumb');
+    const attachmentName = document.getElementById('attachmentName');
+    const attachmentMeta = document.getElementById('attachmentMeta');
+    const attachmentRemoveBtn = document.getElementById('attachmentRemoveBtn');
+    const fileInput = document.getElementById('fileInput');
+    const attachBtn = document.getElementById('attachBtn');
+    const dropZone = document.getElementById('dropZone');
+
+    attachBtn.addEventListener('click', () => fileInput.click());
+    attachmentRemoveBtn.addEventListener('click', clearAttachment);
+
+    fileInput.addEventListener('change', (e) => {
+      if (e.target.files && e.target.files.length > 0) {
+        processUploadedFile(e.target.files[0]);
+      }
+      fileInput.value = '';
+    });
+
+    function clearAttachment() {
+      currentAttachment = null;
+      attachmentBar.style.display = 'none';
+      attachmentThumb.innerHTML = '📎';
+      attachmentName.textContent = '';
+      attachmentMeta.textContent = '';
+    }
+
+    async function processUploadedFile(file) {
+      if (!file) return;
+
+      currentAttachment = {
+        filename: file.name,
+        file_type: (file.name.split('.').pop() || 'file').toUpperCase(),
+        size_bytes: file.size,
+        metadata_summary: 'Processing on Apple Silicon...',
+        extracted_text: null,
+        data: null,
+      };
+
+      attachmentBar.style.display = 'block';
+      attachmentName.textContent = file.name;
+      attachmentMeta.textContent = '⏳ Extracting text on Apple Silicon (PDFKit / Vision OCR)...';
+
+      // Thumbnail preview if image
+      if (file.type && file.type.startsWith('image/')) {
+        const url = URL.createObjectURL(file);
+        attachmentThumb.innerHTML = `<img src="${url}" alt="thumbnail">`;
+      } else {
+        const ext = (file.name.split('.').pop() || '').toLowerCase();
+        const icon = ext === 'pdf' ? '📄' : (['doc', 'docx', 'rtf'].includes(ext) ? '📝' : '💻');
+        attachmentThumb.innerHTML = `<span style="font-size:16px;">${icon}</span>`;
+      }
+
+      // Read as base64 data URL
+      const reader = new FileReader();
+      reader.onload = async function() {
+        const base64Data = reader.result;
+        currentAttachment.data = base64Data;
+
+        try {
+          const res = await fetch('/v1/attachments/process', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              filename: file.name,
+              data: base64Data
+            })
+          });
+          const result = await res.json();
+          if (res.ok) {
+            currentAttachment.extracted_text = result.extracted_text;
+            currentAttachment.metadata_summary = result.metadata_summary;
+            currentAttachment.file_type = result.file_type;
+            attachmentMeta.textContent = `✔ ${result.file_type}: ${result.metadata_summary}`;
+            showToast(`📎 Attached: ${file.name}`);
+          } else {
+            attachmentMeta.textContent = `⚠️ Fallback: ${result.error || 'Server error'}`;
+            showToast(`⚠️ ${result.error || 'Processing issue'}`);
+          }
+        } catch (err) {
+          attachmentMeta.textContent = `Attached (Raw file data)`;
+          showToast(`📎 File attached`);
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+
+    // Clipboard screenshot paste
+    window.addEventListener('paste', (e) => {
+      const items = e.clipboardData && e.clipboardData.items;
+      if (!items) return;
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].kind === 'file') {
+          const file = items[i].getAsFile();
+          if (file) {
+            const ext = (file.type && file.type.split('/')[1]) || 'png';
+            const name = file.name && file.name !== 'image.png' ? file.name : `screenshot_${Date.now()}.${ext}`;
+            const renamed = new File([file], name, { type: file.type || 'image/png' });
+            processUploadedFile(renamed);
+            showToast('📸 Screenshot pasted from clipboard!');
+            break;
+          }
+        }
+      }
+    });
+
+    // Drag and Drop
+    ['dragenter', 'dragover'].forEach(eventName => {
+      window.addEventListener(eventName, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.classList.add('drag-active');
+      }, false);
+    });
+
+    ['dragleave', 'drop'].forEach(eventName => {
+      window.addEventListener(eventName, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dropZone.classList.remove('drag-active');
+      }, false);
+    });
+
+    window.addEventListener('drop', (e) => {
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        processUploadedFile(e.dataTransfer.files[0]);
+      }
+    });
 
     // Telemetry Elements
     const metricTtft = document.getElementById('metricTtft');
@@ -1081,7 +1363,7 @@
     }
 
     // Message append helper
-    function appendMessage(role, initialContent = '') {
+    function appendMessage(role, initialContent = '', attachmentInfo = null) {
       heroSplash.style.display = 'none';
 
       const msgDiv = document.createElement('div');
@@ -1093,7 +1375,21 @@
 
       const bodyDiv = document.createElement('div');
       bodyDiv.className = 'message-body';
-      bodyDiv.innerHTML = renderMarkdown(initialContent);
+
+      if (attachmentInfo) {
+        const badge = document.createElement('div');
+        badge.className = 'msg-attachment-badge';
+        const ext = (attachmentInfo.file_type || '').toUpperCase();
+        const icon = ext === 'PDF' ? '📄' : (ext === 'IMAGE' ? '🖼️' : '📎');
+        badge.innerHTML = `${icon} <strong>${escapeHtml(attachmentInfo.filename)}</strong> <span style="opacity:0.8;">[${escapeHtml(attachmentInfo.metadata_summary || attachmentInfo.file_type || 'File')}]</span>`;
+        bodyDiv.appendChild(badge);
+      }
+
+      if (initialContent) {
+        const textWrapper = document.createElement('div');
+        textWrapper.innerHTML = renderMarkdown(initialContent);
+        bodyDiv.appendChild(textWrapper);
+      }
 
       msgDiv.appendChild(headerDiv);
       msgDiv.appendChild(bodyDiv);
@@ -1132,9 +1428,9 @@
       }
 
       const input = promptInput.value.trim();
-      if (!input) return;
+      if (!input && !currentAttachment) return;
 
-      // Handle slash commands (/model, /models, /clear)
+      // Handle slash commands (/model, /models, /clear, /attach, /file, /detach)
       if (input.startsWith('/')) {
         const parts = input.split(' ');
         const cmd = parts[0].toLowerCase();
@@ -1169,12 +1465,48 @@
           promptInput.style.height = 'auto';
           document.getElementById('btnClearChat').click();
           return;
+        } else if (cmd === '/detach') {
+          promptInput.value = '';
+          promptInput.style.height = 'auto';
+          clearAttachment();
+          showToast('✔ Attachment removed');
+          return;
+        } else if (cmd === '/attach' || cmd === '/file') {
+          promptInput.value = '';
+          promptInput.style.height = 'auto';
+          if (parts.length > 1) {
+            const path = parts.slice(1).join(' ');
+            const fname = path.split('/').pop() || 'attachment';
+            showToast(`⏳ Attaching ${fname}...`);
+            fetch('/v1/attachments/process', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ filename: fname, data: path })
+            }).then(r => r.json()).then(res => {
+              if (res.status === 'success') {
+                currentAttachment = res;
+                attachmentBar.style.display = 'block';
+                attachmentName.textContent = res.filename;
+                attachmentMeta.textContent = `✔ ${res.file_type}: ${res.metadata_summary}`;
+                showToast(`📎 Attached: ${res.filename}`);
+              } else {
+                showToast(`❌ Failed: ${res.error || 'Could not attach'}`);
+              }
+            }).catch(e => showToast(`❌ Error: ${e.message}`));
+          } else {
+            fileInput.click();
+          }
+          return;
         }
       }
 
-      // Add user message
-      chatHistory.push({ role: 'user', content: input });
-      appendMessage('user', input);
+      // Capture and consume current attachment
+      const attachedToSend = currentAttachment;
+      clearAttachment();
+
+      const userText = input || `Please analyze the attached ${attachedToSend ? (attachedToSend.file_type || 'file') : 'file'} (${attachedToSend ? attachedToSend.filename : ''}).`;
+      chatHistory.push({ role: 'user', content: userText });
+      appendMessage('user', userText, attachedToSend);
 
       promptInput.value = '';
       promptInput.style.height = 'auto';
@@ -1210,6 +1542,13 @@
             stream: true,
             temperature: 0.7,
             max_tokens: 2048,
+            attachment: attachedToSend ? {
+              filename: attachedToSend.filename,
+              data: attachedToSend.data,
+              extracted_text: attachedToSend.extracted_text,
+              metadata_summary: attachedToSend.metadata_summary,
+              file_type: attachedToSend.file_type,
+            } : undefined,
           }),
           signal: abortController.signal,
         });

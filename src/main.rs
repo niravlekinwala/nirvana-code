@@ -1,4 +1,5 @@
 mod app;
+pub mod attachment;
 mod cli;
 mod clipboard;
 mod engine;
@@ -627,6 +628,35 @@ fn run_app_loop(
                             continue;
                         }
 
+                        // 1c. Attach File Modal intercept
+                        if app.show_attach_modal {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    app.close_attach_modal();
+                                }
+                                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    app.close_attach_modal();
+                                }
+                                KeyCode::Enter => {
+                                    let path_to_attach = app.attach_input.trim().to_string();
+                                    if !path_to_attach.is_empty() {
+                                        if let Err(e) = app.attach_file(&path_to_attach) {
+                                            app.set_toast(&format!("❌ Failed to attach: {}", e));
+                                        }
+                                    }
+                                    app.close_attach_modal();
+                                }
+                                KeyCode::Backspace => {
+                                    app.attach_input.pop();
+                                }
+                                KeyCode::Char(c) => {
+                                    app.attach_input.push(c);
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+
                         // 2. Command Palette Interaction
                         if app.show_palette {
                             match key.code {
@@ -701,6 +731,10 @@ fn run_app_loop(
                                     app.open_model_picker();
                                     continue;
                                 }
+                                KeyCode::Char('f') => {
+                                    app.open_attach_modal();
+                                    continue;
+                                }
                                 KeyCode::Char('s') => {
                                     app.send_input();
                                     continue;
@@ -726,9 +760,13 @@ fn run_app_loop(
                                     continue;
                                 }
                                 KeyCode::Char('d') => {
-                                    app.scroll_offset = (app.scroll_offset + 10).min(app.max_scroll);
-                                    if app.scroll_offset >= app.max_scroll {
-                                        app.auto_scroll = true;
+                                    if app.current_attachment.is_some() {
+                                        app.detach_file();
+                                    } else {
+                                        app.scroll_offset = (app.scroll_offset + 10).min(app.max_scroll);
+                                        if app.scroll_offset >= app.max_scroll {
+                                            app.auto_scroll = true;
+                                        }
                                     }
                                     continue;
                                 }
@@ -778,7 +816,9 @@ fn run_app_loop(
 
                         match key.code {
                             KeyCode::Esc => {
-                                if is_input_empty {
+                                if app.current_attachment.is_some() {
+                                    app.detach_file();
+                                } else if is_input_empty {
                                     app.exit_confirmation = true;
                                     app.exit_confirmation_time = Some(Instant::now());
                                     app.set_toast("⚠️ Press Ctrl+C or Y to confirm exit");
