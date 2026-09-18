@@ -35,6 +35,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.show_palette {
         draw_command_palette(f, app, size);
     }
+
+    // Exit confirmation modal popup
+    if app.exit_confirmation {
+        draw_exit_confirmation_modal(f, app, size);
+    }
 }
 
 fn draw_header_hud(f: &mut Frame, app: &App, area: Rect) {
@@ -219,7 +224,10 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("KV Cache: ", Style::default().fg(app.theme.text_muted)),
-            Span::styled("Q8_0 Quantized (Metal)", Style::default().fg(app.theme.neon_amber)),
+            Span::styled(
+                app.engine.kv_mode.label(),
+                Style::default().fg(app.theme.neon_amber).add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(vec![
             Span::styled("Model: ", Style::default().fg(app.theme.text_muted)),
@@ -295,8 +303,8 @@ fn draw_content_pane(f: &mut Frame, app: &mut App, area: Rect) {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("  • ", Style::default().fg(app.theme.neon_green)),
-            Span::styled("Quantized KV-Cache: ", Style::default().fg(app.theme.text_bright).add_modifier(Modifier::BOLD)),
-            Span::styled("Q8_0 active, cutting KV RAM consumption by 50%.", Style::default().fg(app.theme.text_dim)),
+            Span::styled("High-Throughput KV-Cache: ", Style::default().fg(app.theme.text_bright).add_modifier(Modifier::BOLD)),
+            Span::styled("F16 active for maximum Metal 3 memory bandwidth & 120+ tok/s decode speed.", Style::default().fg(app.theme.text_dim)),
         ]));
         lines.push(Line::from(vec![
             Span::styled("  • ", Style::default().fg(app.theme.neon_green)),
@@ -363,9 +371,42 @@ fn draw_content_pane(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
+    let inner_height = pane_chunks[0].height.saturating_sub(2) as usize;
+    let inner_width = pane_chunks[0].width.saturating_sub(2) as usize;
+
+    let total_visual_lines = calculate_visual_lines(&lines, inner_width);
+    let max_scroll = (total_visual_lines.saturating_sub(inner_height)) as u16;
+    app.max_scroll = max_scroll;
+
+    if app.auto_scroll {
+        app.scroll_offset = max_scroll;
+    } else {
+        app.scroll_offset = app.scroll_offset.min(max_scroll);
+    }
+
+    let scroll_info = if app.chat_history.is_empty() && app.current_stream.is_empty() {
+        "".to_string()
+    } else if app.auto_scroll {
+        " [▼ LIVE / AUTO-SCROLL] ".to_string()
+    } else {
+        let pct = if app.max_scroll > 0 {
+            (app.scroll_offset as f32 / app.max_scroll as f32 * 100.0) as usize
+        } else {
+            100
+        };
+        format!(" [▲ SCROLL {}% ({}/{}) | Press End to follow] ", pct, app.scroll_offset, app.max_scroll)
+    };
+
+    let title_line = Line::from(vec![
+        Span::styled(" Terminal Workspace ", Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            scroll_info,
+            Style::default().fg(if app.auto_scroll { app.theme.neon_green } else { app.theme.neon_amber }).add_modifier(Modifier::BOLD),
+        ),
+    ]);
+
     let out_block = Block::default()
-        .title(" Terminal Workspace ")
-        .title_style(app.theme.title_style())
+        .title(title_line)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(app.theme.border_dim))
@@ -382,7 +423,7 @@ fn draw_content_pane(f: &mut Frame, app: &mut App, area: Rect) {
     let input_title = if is_generating {
         " Prompt (Generating... Press Ctrl+C to cancel) "
     } else {
-        " Prompt / Code Question (Ctrl+S to Send | Ctrl+K for Palette) "
+        " Prompt / Code Question (Enter to Send | Shift+Enter for Newline | Ctrl+K for Palette) "
     };
 
     let input_border_style = if is_generating {
@@ -407,16 +448,18 @@ fn draw_footer_status(f: &mut Frame, app: &App, area: Rect) {
     let toast = app.toast_message.as_ref().map(|(msg, _)| msg.as_str()).unwrap_or("");
 
     let footer_line = Line::from(vec![
-        Span::styled(" [Ctrl+S] ", Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(" [Enter] ", Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD)),
         Span::styled("Send  ", Style::default().fg(app.theme.text_dim)),
+        Span::styled("[Shift+Enter] ", Style::default().fg(app.theme.neon_cyan)),
+        Span::styled("Newline  ", Style::default().fg(app.theme.text_dim)),
         Span::styled("[Ctrl+K] ", Style::default().fg(app.theme.neon_amber).add_modifier(Modifier::BOLD)),
         Span::styled("Palette  ", Style::default().fg(app.theme.text_dim)),
-        Span::styled("[Ctrl+Y] ", Style::default().fg(app.theme.neon_green).add_modifier(Modifier::BOLD)),
+        Span::styled("[PgUp/Dn] ", Style::default().fg(app.theme.neon_green)),
+        Span::styled("Scroll  ", Style::default().fg(app.theme.text_dim)),
+        Span::styled("[Ctrl+Y] ", Style::default().fg(app.theme.neon_cyan)),
         Span::styled("Copy Code  ", Style::default().fg(app.theme.text_dim)),
         Span::styled("[Ctrl+C] ", Style::default().fg(app.theme.neon_magenta).add_modifier(Modifier::BOLD)),
-        Span::styled("Cancel  ", Style::default().fg(app.theme.text_dim)),
-        Span::styled("[Esc] ", Style::default().fg(app.theme.text_muted).add_modifier(Modifier::BOLD)),
-        Span::styled("Clear  ", Style::default().fg(app.theme.text_dim)),
+        Span::styled("Exit  ", Style::default().fg(app.theme.text_dim)),
         Span::styled(format!("   {}", toast), Style::default().fg(app.theme.neon_green).add_modifier(Modifier::BOLD)),
     ]);
 
@@ -493,4 +536,83 @@ fn draw_command_palette(f: &mut Frame, app: &App, area: Rect) {
             .style(Style::default().bg(app.theme.bg_card)),
     );
     f.render_widget(items_list, chunks[1]);
+}
+
+fn draw_exit_confirmation_modal(f: &mut Frame, app: &App, area: Rect) {
+    let popup_width = 58;
+    let popup_height = 8;
+    let popup_x = (area.width.saturating_sub(popup_width)) / 2;
+    let popup_y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_rect = Rect::new(popup_x, popup_y, popup_width, popup_height);
+
+    f.render_widget(Clear, popup_rect);
+
+    let modal_block = Block::default()
+        .title(" ⚠️  EXIT NIRVANA CODE ")
+        .title_style(
+            Style::default()
+                .fg(app.theme.neon_amber)
+                .bg(app.theme.bg_card)
+                .add_modifier(Modifier::BOLD),
+        )
+        .borders(Borders::ALL)
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(app.theme.neon_magenta))
+        .style(Style::default().bg(app.theme.bg_card));
+
+    let content = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("   Are you sure you want to quit ", Style::default().fg(app.theme.text_bright)),
+            Span::styled("Nirvana Code", Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD)),
+            Span::styled("?", Style::default().fg(app.theme.text_bright)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("   Press ", Style::default().fg(app.theme.text_muted)),
+            Span::styled("[Ctrl+C]", Style::default().fg(app.theme.neon_magenta).add_modifier(Modifier::BOLD)),
+            Span::styled(" or ", Style::default().fg(app.theme.text_muted)),
+            Span::styled("[Y]", Style::default().fg(app.theme.neon_magenta).add_modifier(Modifier::BOLD)),
+            Span::styled(" to exit  •  Press ", Style::default().fg(app.theme.text_muted)),
+            Span::styled("[Esc]", Style::default().fg(app.theme.neon_green).add_modifier(Modifier::BOLD)),
+            Span::styled(" to cancel", Style::default().fg(app.theme.text_muted)),
+        ]),
+    ];
+
+    let p = Paragraph::new(content).block(modal_block);
+    f.render_widget(p, popup_rect);
+}
+
+fn calculate_visual_lines(lines: &[Line], width: usize) -> usize {
+    if width == 0 {
+        return lines.len();
+    }
+    let mut total = 0;
+    for line in lines {
+        let line_len: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+        if line_len == 0 {
+            total += 1;
+        } else {
+            let mut line_count = 1;
+            let mut cur_col = 0;
+            let full_line: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            for word in full_line.split(' ') {
+                let w_len = word.chars().count();
+                if cur_col == 0 {
+                    cur_col = w_len;
+                } else if cur_col + 1 + w_len <= width {
+                    cur_col += 1 + w_len;
+                } else {
+                    line_count += 1;
+                    cur_col = w_len;
+                }
+                while cur_col > width && width > 0 {
+                    line_count += 1;
+                    cur_col -= width;
+                }
+            }
+            total += line_count;
+        }
+    }
+    total
 }
