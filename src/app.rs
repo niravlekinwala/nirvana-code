@@ -332,6 +332,31 @@ impl<'a> App<'a> {
         }
     }
 
+    pub fn copy_full_conversation(&mut self) {
+        if self.chat_history.is_empty() && self.current_stream.is_empty() {
+            self.set_toast("No conversation to copy");
+            return;
+        }
+
+        let mut full_text = String::new();
+        for msg in &self.chat_history {
+            if msg.role == "user" {
+                full_text.push_str(&format!("### USER\n{}\n\n", msg.content));
+            } else {
+                full_text.push_str(&format!("### ASSISTANT\n{}\n\n", msg.content));
+            }
+        }
+        if !self.current_stream.is_empty() {
+            full_text.push_str(&format!("### ASSISTANT (streaming)\n{}\n\n", self.current_stream));
+        }
+
+        if ClipboardHelper::copy_text(full_text.trim()).is_ok() {
+            self.set_toast("✔ Copied full conversation to clipboard!");
+        } else {
+            self.set_toast("❌ Failed to copy to clipboard");
+        }
+    }
+
     pub fn execute_palette_action(&mut self, action: PaletteAction) {
         match action {
             PaletteAction::SelectTemplate(id) => {
@@ -351,6 +376,9 @@ impl<'a> App<'a> {
             }
             PaletteAction::CopyLastResponse => {
                 self.copy_last_response();
+            }
+            PaletteAction::CopyFullConversation => {
+                self.copy_full_conversation();
             }
             PaletteAction::CopyCodeSnippet(_) => {
                 self.copy_first_code_snippet();

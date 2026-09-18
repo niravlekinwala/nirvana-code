@@ -5,6 +5,7 @@ pub enum PaletteAction {
     SelectModel(String),
     ClearHistory,
     CopyLastResponse,
+    CopyFullConversation,
     CopyCodeSnippet(usize),
     ToggleSpeculative,
     ToggleKvQuantization,
@@ -36,9 +37,23 @@ impl PaletteManager {
 
         items.push(PaletteItem {
             title: "Copy Full Assistant Response".to_string(),
-            subtitle: "Copy the most recent generated response to system clipboard".to_string(),
+            subtitle: "Copy the entire recent generated response to system clipboard [Ctrl+O]".to_string(),
             category: "Controls",
             action: PaletteAction::CopyLastResponse,
+        });
+
+        items.push(PaletteItem {
+            title: "Copy Full Conversation History".to_string(),
+            subtitle: "Copy entire multi-turn conversation and code to system clipboard".to_string(),
+            category: "Controls",
+            action: PaletteAction::CopyFullConversation,
+        });
+
+        items.push(PaletteItem {
+            title: "Copy First Code Snippet".to_string(),
+            subtitle: "Copy the first code block to system clipboard [Ctrl+Y]".to_string(),
+            category: "Controls",
+            action: PaletteAction::CopyCodeSnippet(0),
         });
 
         items.push(PaletteItem {

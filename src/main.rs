@@ -572,6 +572,10 @@ fn run_app_loop(
                                     app.send_input();
                                     continue;
                                 }
+                                KeyCode::Char('o') => {
+                                    app.copy_last_response();
+                                    continue;
+                                }
                                 KeyCode::Char('y') => {
                                     app.copy_first_code_snippet();
                                     continue;
