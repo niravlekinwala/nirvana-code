@@ -63,14 +63,18 @@ impl SpeculativeEngine {
 
         let kv_type = ModelEngine::resolve_auto_kv(&self.target_model).to_llama_type();
 
+        let n_batch = 2048.min(self.n_ctx);
+        let n_ubatch = 512.min(n_batch);
+        let batch_size = (n_batch as usize).min(512);
+
         // 1. Context params with Metal Flash Attention & Auto KV
         let make_params = || {
             LlamaContextParams::default()
                 .with_n_ctx(Some(NonZeroU32::new(self.n_ctx).unwrap()))
                 .with_n_threads(4)
                 .with_n_threads_batch(8)
-                .with_n_batch(512)
-                .with_n_ubatch(512)
+                .with_n_batch(n_batch)
+                .with_n_ubatch(n_ubatch)
                 .with_flash_attention_policy(llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_AUTO)
                 .with_type_k(kv_type)
                 .with_type_v(kv_type)
@@ -103,9 +107,9 @@ impl SpeculativeEngine {
         }
 
         // Prefill Target Context
-        let mut target_batch = LlamaBatch::new(2048, 1);
+        let mut target_batch = LlamaBatch::new(batch_size, 1);
         let mut target_pos = 0;
-        for chunk in target_tokens.chunks(2048) {
+        for chunk in target_tokens.chunks(batch_size) {
             if cancel_token.load(Ordering::Relaxed) {
                 let _ = tx.send(StreamEvent::Done);
                 return Ok(());
@@ -121,9 +125,9 @@ impl SpeculativeEngine {
         }
 
         // Prefill Draft Context
-        let mut draft_batch = LlamaBatch::new(2048, 1);
+        let mut draft_batch = LlamaBatch::new(batch_size, 1);
         let mut draft_pos = 0;
-        for chunk in draft_tokens.chunks(2048) {
+        for chunk in draft_tokens.chunks(batch_size) {
             if cancel_token.load(Ordering::Relaxed) {
                 let _ = tx.send(StreamEvent::Done);
                 return Ok(());

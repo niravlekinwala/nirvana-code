@@ -270,10 +270,15 @@ guard let doc = PDFDocument(url: url) else {
 let count = doc.pageCount
 print("PAGES:\(count)")
 var fullText = ""
-for i in 0..<count {
+let maxPages = min(count, 50)
+for i in 0..<maxPages {
     if let page = doc.page(at: i), let text = page.string {
         fullText += "\n[Page \(i + 1)]\n"
         fullText += text
+        if fullText.count > 25000 {
+            fullText += "\n[... Document truncated at 25,000 characters to fit model context ...]\n"
+            break
+        }
     }
 }
 print("---CONTENT---")
@@ -426,6 +431,12 @@ fn extract_document(path: &Path) -> Result<String> {
         if out.status.success() {
             let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !text.is_empty() {
+                if text.len() > 25000 {
+                    return Ok(format!(
+                        "{}\n\n[... Document truncated at 25,000 chars to fit model context ...]",
+                        &text[..25000]
+                    ));
+                }
                 return Ok(text);
             }
         }
@@ -438,7 +449,14 @@ fn extract_document(path: &Path) -> Result<String> {
 fn extract_code_or_text(path: &Path) -> Result<String> {
     let bytes = fs::read(path).with_context(|| format!("Failed to read file: {}", path.display()))?;
     let text = String::from_utf8_lossy(&bytes).to_string();
-    Ok(text)
+    if text.len() > 25000 {
+        Ok(format!(
+            "{}\n\n[... File truncated at 25,000 characters to fit model context ...]",
+            &text[..25000]
+        ))
+    } else {
+        Ok(text)
+    }
 }
 
 #[cfg(test)]

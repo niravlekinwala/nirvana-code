@@ -240,11 +240,29 @@ impl ModelEngine {
             }
         };
 
+        let max_ctx = self.n_ctx as usize;
+        let safe_prompt_limit = max_ctx.saturating_sub(config.max_tokens.min(max_ctx / 2).max(128));
+
+        let prompt_tokens = if prompt_tokens.len() > safe_prompt_limit {
+            // Gracefully truncate prompt if it exceeds context capacity: keep system header and tail
+            let head_len = 256.min(safe_prompt_limit / 4);
+            let tail_len = safe_prompt_limit.saturating_sub(head_len);
+            let mut truncated = Vec::with_capacity(safe_prompt_limit);
+            truncated.extend_from_slice(&prompt_tokens[..head_len]);
+            truncated.extend_from_slice(&prompt_tokens[prompt_tokens.len().saturating_sub(tail_len)..]);
+            truncated
+        } else {
+            prompt_tokens
+        };
+
         let n_prompt = prompt_tokens.len();
         if n_prompt == 0 {
             let _ = tx.send(StreamEvent::Done);
             return Ok(());
         }
+
+        let n_batch = 2048.min(self.n_ctx);
+        let n_ubatch = 512.min(n_batch);
 
         // 2. Lock and acquire or initialize persistent context
         let mut ctx_guard = self.context.lock().unwrap();
@@ -253,8 +271,8 @@ impl ModelEngine {
                 .with_n_ctx(Some(NonZeroU32::new(self.n_ctx).unwrap()))
                 .with_n_threads(4)
                 .with_n_threads_batch(8)
-                .with_n_batch(512)
-                .with_n_ubatch(512)
+                .with_n_batch(n_batch)
+                .with_n_ubatch(n_ubatch)
                 .with_flash_attention_policy(llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_AUTO)
                 .with_type_k(self.kv_mode.to_llama_type())
                 .with_type_v(self.kv_mode.to_llama_type());
@@ -297,9 +315,10 @@ impl ModelEngine {
         let tokens_to_eval = &prompt_tokens[common_prefix_len..];
         let mut n_curr = common_prefix_len;
 
-        // Ingest remaining prompt tokens in chunks
-        let mut batch = LlamaBatch::new(2048, 1);
-        for chunk in tokens_to_eval.chunks(2048) {
+        // Ingest remaining prompt tokens in chunks strictly <= n_batch
+        let batch_size = (n_batch as usize).min(512);
+        let mut batch = LlamaBatch::new(batch_size, 1);
+        for chunk in tokens_to_eval.chunks(batch_size) {
             if cancel_token.load(Ordering::Relaxed) {
                 let _ = tx.send(StreamEvent::Done);
                 return Ok(());
