@@ -17,7 +17,10 @@ use app::{App, EngineState};
 use clap::Parser;
 use cli::{Cli, Commands};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers,
+        MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -422,7 +425,7 @@ fn run_tui(
 ) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -444,7 +447,7 @@ fn run_tui(
 
     // Restore terminal cleanly
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
 
     if let Err(e) = res {
@@ -468,169 +471,239 @@ fn run_app_loop(
 
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == event::KeyEventKind::Press {
-                    // 1. Exit Confirmation Modal intercept
-                    if app.exit_confirmation {
-                        match key.code {
-                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                return Ok(());
-                            }
-                            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                                return Ok(());
-                            }
-                            _ => {
-                                app.exit_confirmation = false;
-                                app.exit_confirmation_time = None;
-                                app.set_toast("Exit cancelled");
-                                continue;
-                            }
-                        }
-                    }
-
-                    // 2. Command Palette Interaction
-                    if app.show_palette {
-                        match key.code {
-                            KeyCode::Esc => {
-                                app.show_palette = false;
-                            }
-                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                app.show_palette = false;
-                            }
-                            KeyCode::Up => {
-                                if app.palette_index > 0 {
-                                    app.palette_index -= 1;
-                                }
-                            }
-                            KeyCode::Down => {
-                                let filtered =
-                                    PaletteManager::filter_items(&app.palette_items, &app.palette_query);
-                                if !filtered.is_empty() && app.palette_index + 1 < filtered.len() {
-                                    app.palette_index += 1;
-                                }
-                            }
-                            KeyCode::Enter => {
-                                let filtered =
-                                    PaletteManager::filter_items(&app.palette_items, &app.palette_query);
-                                if let Some(item) = filtered.get(app.palette_index) {
-                                    let action = item.action.clone();
-                                    app.execute_palette_action(action);
-                                }
-                            }
-                            KeyCode::Backspace => {
-                                app.palette_query.pop();
-                                app.palette_index = 0;
-                            }
-                            KeyCode::Char(c) => {
-                                app.palette_query.push(c);
-                                app.palette_index = 0;
-                            }
-                            _ => {}
-                        }
-                        continue;
-                    }
-
-                    // 3. Global Shortcuts
-                    if key.modifiers.contains(KeyModifiers::CONTROL) {
-                        match key.code {
-                            KeyCode::Char('k') => {
-                                app.show_palette = !app.show_palette;
-                                app.palette_query.clear();
-                                app.palette_index = 0;
-                                continue;
-                            }
-                            KeyCode::Char('c') => {
-                                if app.engine_state == EngineState::Generating {
-                                    app.cancel_generation();
-                                } else {
-                                    app.exit_confirmation = true;
-                                    app.exit_confirmation_time = Some(Instant::now());
-                                    app.set_toast("⚠️ Press Ctrl+C again to confirm exit");
-                                }
-                                continue;
-                            }
-                            KeyCode::Char('s') => {
-                                app.send_input();
-                                continue;
-                            }
-                            KeyCode::Char('y') => {
-                                app.copy_first_code_snippet();
-                                continue;
-                            }
-                            KeyCode::Char('r') => {
-                                app.chat_history.clear();
-                                app.current_stream.clear();
-                                app.engine.clear_cache();
-                                app.set_toast("✔ KV Cache & conversation history cleared");
-                                continue;
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    // 4. Normal Input & Scrolling Handling
-                    match key.code {
-                        KeyCode::Esc => {
-                            let text = app.input_textarea.lines().join("");
-                            if text.trim().is_empty() {
-                                app.exit_confirmation = true;
-                                app.exit_confirmation_time = Some(Instant::now());
-                                app.set_toast("⚠️ Press Ctrl+C or Y to confirm exit");
-                            } else {
-                                app.input_textarea = tui_textarea::TextArea::default();
-                                app.input_textarea.set_placeholder_text("Type your prompt or code question... (Enter to send, Shift+Enter for newline, Ctrl+K for palette)");
-                            }
-                        }
-                        KeyCode::PageUp => {
-                            app.auto_scroll = false;
-                            app.scroll_offset = app.scroll_offset.saturating_sub(6);
-                        }
-                        KeyCode::PageDown => {
-                            app.scroll_offset = (app.scroll_offset + 6).min(app.max_scroll);
-                            if app.scroll_offset >= app.max_scroll {
-                                app.auto_scroll = true;
-                            }
-                        }
-                        KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) => {
+            match event::read()? {
+                Event::Mouse(mouse) => {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
                             app.auto_scroll = false;
                             app.scroll_offset = app.scroll_offset.saturating_sub(3);
                         }
-                        KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => {
+                        MouseEventKind::ScrollDown => {
                             app.scroll_offset = (app.scroll_offset + 3).min(app.max_scroll);
                             if app.scroll_offset >= app.max_scroll {
                                 app.auto_scroll = true;
                             }
                         }
-                        KeyCode::Home => {
-                            let text_empty = app.input_textarea.lines().join("").trim().is_empty();
-                            if text_empty {
+                        _ => {}
+                    }
+                }
+                Event::Key(key) => {
+                    if key.kind == event::KeyEventKind::Press {
+                        // 1. Exit Confirmation Modal intercept
+                        if app.exit_confirmation {
+                            match key.code {
+                                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    return Ok(());
+                                }
+                                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                    return Ok(());
+                                }
+                                _ => {
+                                    app.exit_confirmation = false;
+                                    app.exit_confirmation_time = None;
+                                    app.set_toast("Exit cancelled");
+                                    continue;
+                                }
+                            }
+                        }
+
+                        // 2. Command Palette Interaction
+                        if app.show_palette {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    app.show_palette = false;
+                                }
+                                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    app.show_palette = false;
+                                }
+                                KeyCode::Up => {
+                                    if app.palette_index > 0 {
+                                        app.palette_index -= 1;
+                                    }
+                                }
+                                KeyCode::Down => {
+                                    let filtered =
+                                        PaletteManager::filter_items(&app.palette_items, &app.palette_query);
+                                    if !filtered.is_empty() && app.palette_index + 1 < filtered.len() {
+                                        app.palette_index += 1;
+                                    }
+                                }
+                                KeyCode::Enter => {
+                                    let filtered =
+                                        PaletteManager::filter_items(&app.palette_items, &app.palette_query);
+                                    if let Some(item) = filtered.get(app.palette_index) {
+                                        let action = item.action.clone();
+                                        app.execute_palette_action(action);
+                                    }
+                                }
+                                KeyCode::Backspace => {
+                                    app.palette_query.pop();
+                                    app.palette_index = 0;
+                                }
+                                KeyCode::Char(c) => {
+                                    app.palette_query.push(c);
+                                    app.palette_index = 0;
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+
+                        // 3. Global Shortcuts
+                        if key.modifiers.contains(KeyModifiers::CONTROL) {
+                            match key.code {
+                                KeyCode::Char('k') => {
+                                    app.show_palette = !app.show_palette;
+                                    app.palette_query.clear();
+                                    app.palette_index = 0;
+                                    continue;
+                                }
+                                KeyCode::Char('c') => {
+                                    if app.engine_state == EngineState::Generating {
+                                        app.cancel_generation();
+                                    } else {
+                                        app.exit_confirmation = true;
+                                        app.exit_confirmation_time = Some(Instant::now());
+                                        app.set_toast("⚠️ Press Ctrl+C again to confirm exit");
+                                    }
+                                    continue;
+                                }
+                                KeyCode::Char('s') => {
+                                    app.send_input();
+                                    continue;
+                                }
+                                KeyCode::Char('y') => {
+                                    app.copy_first_code_snippet();
+                                    continue;
+                                }
+                                KeyCode::Char('r') => {
+                                    app.chat_history.clear();
+                                    app.current_stream.clear();
+                                    app.engine.clear_cache();
+                                    app.set_toast("✔ KV Cache & conversation history cleared");
+                                    continue;
+                                }
+                                KeyCode::Char('u') => {
+                                    app.auto_scroll = false;
+                                    app.scroll_offset = app.scroll_offset.saturating_sub(10);
+                                    continue;
+                                }
+                                KeyCode::Char('d') => {
+                                    app.scroll_offset = (app.scroll_offset + 10).min(app.max_scroll);
+                                    if app.scroll_offset >= app.max_scroll {
+                                        app.auto_scroll = true;
+                                    }
+                                    continue;
+                                }
+                                KeyCode::Up => {
+                                    app.auto_scroll = false;
+                                    app.scroll_offset = app.scroll_offset.saturating_sub(3);
+                                    continue;
+                                }
+                                KeyCode::Down => {
+                                    app.scroll_offset = (app.scroll_offset + 3).min(app.max_scroll);
+                                    if app.scroll_offset >= app.max_scroll {
+                                        app.auto_scroll = true;
+                                    }
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        // 4. Shift & Alt scrolling shortcuts
+                        if key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::ALT) {
+                            match key.code {
+                                KeyCode::Up => {
+                                    app.auto_scroll = false;
+                                    app.scroll_offset = app.scroll_offset.saturating_sub(3);
+                                    continue;
+                                }
+                                KeyCode::Down => {
+                                    app.scroll_offset = (app.scroll_offset + 3).min(app.max_scroll);
+                                    if app.scroll_offset >= app.max_scroll {
+                                        app.auto_scroll = true;
+                                    }
+                                    continue;
+                                }
+                                KeyCode::Enter => {
+                                    app.input_textarea.insert_newline();
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        // 5. Normal Input & Workspace Scrolling Handling
+                        let is_input_empty = app.input_textarea.lines().join("").trim().is_empty();
+                        let cursor_at_top = app.input_textarea.cursor().0 == 0;
+                        let num_lines = app.input_textarea.lines().len();
+
+                        match key.code {
+                            KeyCode::Esc => {
+                                if is_input_empty {
+                                    app.exit_confirmation = true;
+                                    app.exit_confirmation_time = Some(Instant::now());
+                                    app.set_toast("⚠️ Press Ctrl+C or Y to confirm exit");
+                                } else {
+                                    app.input_textarea = tui_textarea::TextArea::default();
+                                    app.input_textarea.set_placeholder_text("Type your prompt or code question... (Enter to send, Shift+Enter for newline, Ctrl+K for palette)");
+                                }
+                            }
+                            KeyCode::PageUp => {
                                 app.auto_scroll = false;
-                                app.scroll_offset = 0;
-                            } else {
-                                app.input_textarea.input(key);
+                                app.scroll_offset = app.scroll_offset.saturating_sub(6);
                             }
-                        }
-                        KeyCode::End => {
-                            let text_empty = app.input_textarea.lines().join("").trim().is_empty();
-                            if text_empty {
-                                app.auto_scroll = true;
-                                app.scroll_offset = app.max_scroll;
-                            } else {
-                                app.input_textarea.input(key);
+                            KeyCode::PageDown => {
+                                app.scroll_offset = (app.scroll_offset + 6).min(app.max_scroll);
+                                if app.scroll_offset >= app.max_scroll {
+                                    app.auto_scroll = true;
+                                }
                             }
-                        }
-                        KeyCode::Enter => {
-                            if key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::ALT) {
-                                app.input_textarea.insert_newline();
-                            } else {
+                            KeyCode::Up => {
+                                if is_input_empty || num_lines <= 1 || cursor_at_top {
+                                    app.auto_scroll = false;
+                                    app.scroll_offset = app.scroll_offset.saturating_sub(3);
+                                } else {
+                                    app.input_textarea.input(key);
+                                }
+                            }
+                            KeyCode::Down => {
+                                if (!app.auto_scroll || is_input_empty) && app.scroll_offset < app.max_scroll {
+                                    app.scroll_offset = (app.scroll_offset + 3).min(app.max_scroll);
+                                    if app.scroll_offset >= app.max_scroll {
+                                        app.auto_scroll = true;
+                                    }
+                                } else {
+                                    app.input_textarea.input(key);
+                                }
+                            }
+                            KeyCode::Home => {
+                                if is_input_empty {
+                                    app.auto_scroll = false;
+                                    app.scroll_offset = 0;
+                                } else {
+                                    app.input_textarea.input(key);
+                                }
+                            }
+                            KeyCode::End => {
+                                if is_input_empty {
+                                    app.auto_scroll = true;
+                                    app.scroll_offset = app.max_scroll;
+                                } else {
+                                    app.input_textarea.input(key);
+                                }
+                            }
+                            KeyCode::Enter => {
                                 app.send_input();
                             }
-                        }
-                        _ => {
-                            app.input_textarea.input(key);
+                            _ => {
+                                app.input_textarea.input(key);
+                            }
                         }
                     }
                 }
+                _ => {}
             }
         }
 

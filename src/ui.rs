@@ -6,7 +6,8 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap,
+    Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Scrollbar,
+    ScrollbarOrientation, ScrollbarState, Wrap,
 };
 use ratatui::Frame;
 
@@ -418,6 +419,24 @@ fn draw_content_pane(f: &mut Frame, app: &mut App, area: Rect) {
         .scroll((app.scroll_offset, 0));
     f.render_widget(out_paragraph, pane_chunks[0]);
 
+    // Render interactive visual scrollbar on the right edge of workspace
+    if app.max_scroll > 0 {
+        let mut scrollbar_state = ScrollbarState::new(app.max_scroll as usize)
+            .position(app.scroll_offset as usize);
+        let scrollbar = Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .track_symbol(Some("│"))
+            .thumb_symbol("█")
+            .style(Style::default().fg(if app.auto_scroll {
+                app.theme.neon_cyan
+            } else {
+                app.theme.neon_amber
+            }));
+        f.render_stateful_widget(scrollbar, pane_chunks[0], &mut scrollbar_state);
+    }
+
     // 2. Input Box
     let is_generating = app.engine_state == EngineState::Generating;
     let input_title = if is_generating {
@@ -452,10 +471,10 @@ fn draw_footer_status(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("Send  ", Style::default().fg(app.theme.text_dim)),
         Span::styled("[Shift+Enter] ", Style::default().fg(app.theme.neon_cyan)),
         Span::styled("Newline  ", Style::default().fg(app.theme.text_dim)),
+        Span::styled("[↑/↓ or Scroll] ", Style::default().fg(app.theme.neon_green).add_modifier(Modifier::BOLD)),
+        Span::styled("History  ", Style::default().fg(app.theme.text_dim)),
         Span::styled("[Ctrl+K] ", Style::default().fg(app.theme.neon_amber).add_modifier(Modifier::BOLD)),
         Span::styled("Palette  ", Style::default().fg(app.theme.text_dim)),
-        Span::styled("[PgUp/Dn] ", Style::default().fg(app.theme.neon_green)),
-        Span::styled("Scroll  ", Style::default().fg(app.theme.text_dim)),
         Span::styled("[Ctrl+Y] ", Style::default().fg(app.theme.neon_cyan)),
         Span::styled("Copy Code  ", Style::default().fg(app.theme.text_dim)),
         Span::styled("[Ctrl+C] ", Style::default().fg(app.theme.neon_magenta).add_modifier(Modifier::BOLD)),
