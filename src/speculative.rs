@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use llama_cpp_2::context::params::{KvCacheType, LlamaContextParams};
+use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
@@ -13,13 +13,12 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::engine::StreamEvent;
+use crate::engine::{ModelEngine, StreamEvent};
 
-#[allow(dead_code)]
 pub struct SpeculativeEngine {
     backend: Arc<LlamaBackend>,
-    target_model: Arc<LlamaModel>,
-    draft_model: Arc<LlamaModel>,
+    pub target_model: Arc<LlamaModel>,
+    pub draft_model: Arc<LlamaModel>,
     pub n_gpu_layers: u32,
     pub n_ctx: u32,
     pub n_draft: usize,
@@ -65,14 +64,19 @@ impl SpeculativeEngine {
     ) -> Result<()> {
         let start_time = Instant::now();
 
-        // 1. Context params with Q8_0 KV quantization
+        let kv_type = ModelEngine::resolve_auto_kv(&self.target_model).to_llama_type();
+
+        // 1. Context params with Metal Flash Attention & Auto KV
         let make_params = || {
             LlamaContextParams::default()
                 .with_n_ctx(Some(NonZeroU32::new(self.n_ctx).unwrap()))
-                .with_n_threads(8)
+                .with_n_threads(4)
                 .with_n_threads_batch(8)
-                .with_type_k(KvCacheType::Q8_0)
-                .with_type_v(KvCacheType::Q8_0)
+                .with_n_batch(512)
+                .with_n_ubatch(512)
+                .with_flash_attention_policy(llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_AUTO)
+                .with_type_k(kv_type)
+                .with_type_v(kv_type)
         };
 
         let mut target_ctx = self.target_model.new_context(&self.backend, make_params())?;
@@ -141,7 +145,7 @@ impl SpeculativeEngine {
             LlamaSampler::greedy()
         } else {
             LlamaSampler::chain_simple([
-                LlamaSampler::penalties(self.target_model.n_vocab(), 64, 1.15, 0.0, 0.0),
+                LlamaSampler::min_p(0.05, 1),
                 LlamaSampler::top_k(40),
                 LlamaSampler::top_p(0.9, 1),
                 LlamaSampler::temp(temperature),

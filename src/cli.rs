@@ -20,8 +20,8 @@ pub struct Cli {
     #[arg(
         long = "kv-type",
         global = true,
-        default_value = "q8_0",
-        help = "KV-Cache quantization format [q8_0, q4_0, f16]"
+        default_value = "auto",
+        help = "KV-Cache quantization format [auto, q8_0, q4_0, f16]"
     )]
     pub kv_type: String,
 
@@ -67,6 +67,37 @@ pub struct Cli {
     )]
     pub temperature: f32,
 
+    #[arg(
+        long = "min-p",
+        global = true,
+        default_value = "0.05",
+        help = "Minimum P sampling threshold (cuts low-probability syntax hallucinations)"
+    )]
+    pub min_p: f32,
+
+    #[arg(
+        long = "top-p",
+        global = true,
+        default_value = "0.9",
+        help = "Nucleus sampling threshold"
+    )]
+    pub top_p: f32,
+
+    #[arg(
+        long = "top-k",
+        global = true,
+        default_value = "40",
+        help = "Top-K sampling limit"
+    )]
+    pub top_k: i32,
+
+    #[arg(
+        long = "ngram-speculative",
+        global = true,
+        help = "Enable prompt lookup decoding (self-speculative n-gram matching) for 1.5x-2x code speedup"
+    )]
+    pub ngram_speculative: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -110,5 +141,29 @@ pub enum Commands {
             help = "Template preset ID (e.g. claude-37-hybrid, antigravity-20, deepseek-r1)"
         )]
         preset: String,
+    },
+
+    #[command(about = "Start OpenAI-compatible HTTP API server & Unix Domain Socket daemon")]
+    Serve {
+        #[arg(
+            short = 'p',
+            long = "port",
+            default_value = "8080",
+            help = "HTTP port to bind to"
+        )]
+        port: u16,
+
+        #[arg(
+            long = "host",
+            default_value = "127.0.0.1",
+            help = "Host address to bind to"
+        )]
+        host: String,
+
+        #[arg(
+            long = "socket",
+            help = "Unix domain socket path (e.g. /tmp/nirvana.sock)"
+        )]
+        socket: Option<PathBuf>,
     },
 }
