@@ -282,6 +282,7 @@ impl<'a> App<'a> {
                             prefix_reused: Some(self.current_prefix_reused),
                             prefix_hit: self.current_prefix_hit,
                         });
+                        self.current_stream.clear();
                         break;
                     }
                     StreamEvent::Error(err) => {
