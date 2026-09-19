@@ -206,7 +206,11 @@ cp target/release/nirvana-code /usr/local/bin/
 ```bash
 brew tap niravlekinwala/nirvana
 brew install nirvana-code
+
+# Or install in a single command:
+brew install niravlekinwala/nirvana/nirvana-code
 ```
+> **Note for macOS Homebrew 4.4+**: If prompted with `Refusing to load formula from untrusted tap`, run `brew trust niravlekinwala/nirvana`.
 
 ---
 
