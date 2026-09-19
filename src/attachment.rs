@@ -143,17 +143,31 @@ impl Attachment {
             base64_payload.trim()
         };
 
+        let sanitized_b64: String = clean_b64.chars().filter(|c| !c.is_whitespace()).collect();
         let decoded = BASE64_STANDARD
-            .decode(clean_b64)
+            .decode(&sanitized_b64)
             .with_context(|| "Failed to decode base64 payload")?;
 
         let temp_dir = std::env::temp_dir().join("nirvana_attachments");
         fs::create_dir_all(&temp_dir)?;
 
-        let sanitized_name = filename
+        let mut sanitized_name = filename
             .chars()
             .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
             .collect::<String>();
+
+        // Infer extension if missing from filename
+        if !sanitized_name.contains('.') && base64_payload.starts_with("data:") {
+            if base64_payload.starts_with("data:application/pdf") {
+                sanitized_name.push_str(".pdf");
+            } else if base64_payload.starts_with("data:image/png") {
+                sanitized_name.push_str(".png");
+            } else if base64_payload.starts_with("data:image/jpeg") || base64_payload.starts_with("data:image/jpg") {
+                sanitized_name.push_str(".jpg");
+            } else if base64_payload.starts_with("data:image/webp") {
+                sanitized_name.push_str(".webp");
+            }
+        }
 
         let temp_file_path = temp_dir.join(format!(
             "{}_{}",
@@ -166,12 +180,13 @@ impl Attachment {
 
         fs::write(&temp_file_path, &decoded)?;
 
-        let mut att = Self::from_file(&temp_file_path)?;
+        let res = Self::from_file(&temp_file_path);
+        // Ensure cleanup of temporary file
+        let _ = fs::remove_file(&temp_file_path);
+
+        let mut att = res?;
         att.filename = filename.to_string();
         att.base64_data = Some(base64_payload.to_string());
-
-        // Cleanup temporary file
-        let _ = fs::remove_file(temp_file_path);
 
         Ok(att)
     }
@@ -489,11 +504,26 @@ mod tests {
     }
 
     #[test]
-    fn test_attachment_from_image_ocr() {
-        if Path::new("/tmp/nirvana_test_ocr.png").exists() {
-            let att = Attachment::from_file("/tmp/nirvana_test_ocr.png").unwrap();
-            assert_eq!(att.file_type, AttachmentType::Image);
-            assert!(att.extracted_text.to_uppercase().contains("NIRVANA"));
+    fn test_attachment_from_base64_with_newlines() {
+        // "fn main() { println!(\"from base64\"); }" base64 encoded with newlines/spaces
+        let raw = "fn main() { println!(\"from base64\"); }";
+        let b64 = BASE64_STANDARD.encode(raw);
+        let b64_with_newlines = format!("  \n{} \r\n", b64);
+        let data_url = format!("data:text/plain;base64,{}", b64_with_newlines);
+
+        let att = Attachment::from_base64("sample.rs", &data_url).unwrap();
+        assert_eq!(att.filename, "sample.rs");
+        assert!(att.extracted_text.contains("from base64"));
+    }
+
+    #[test]
+    fn test_attachment_pdf_extraction() {
+        let pdf_path = Path::new("/Users/nirav/Downloads/es5c01493_si_001.pdf");
+        if pdf_path.exists() {
+            let att = Attachment::from_file(pdf_path).unwrap();
+            assert_eq!(att.file_type, AttachmentType::Pdf);
+            assert!(att.metadata_summary.contains("9 pages"));
+            assert!(att.extracted_text.contains("Regional Air Quality Management"));
         }
     }
 }
