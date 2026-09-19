@@ -33,7 +33,11 @@ class NirvanaCode < Formula
       ENV["GGML_CPU_ARM_ARCH"] = "armv8.4-a+dotprod+fp16"
       system "cargo", "install", "--locked", "--root", prefix, "--path", "."
     else
-      bin.install "nirvana-code"
+      if File.exist?("nirvana-code-#{version}-aarch64-apple-darwin")
+        bin.install "nirvana-code-#{version}-aarch64-apple-darwin" => "nirvana-code"
+      else
+        bin.install "nirvana-code"
+      end
     end
   end
 
