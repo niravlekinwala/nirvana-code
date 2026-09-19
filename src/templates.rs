@@ -1,3 +1,5 @@
+use crate::chat::ChatMessage;
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct PromptTemplate {
@@ -77,24 +79,17 @@ pub const TEMPLATES: &[PromptTemplate] = &[
 ];
 
 impl PromptTemplate {
-    #[allow(dead_code)]
-    pub fn format_prompt(&self, user_input: &str) -> (String, String) {
-        let full_prompt = format!(
-            "{}{}{}",
-            self.prompt_prefix,
-            user_input.trim(),
-            self.prompt_suffix
-        );
-        (self.system_prompt.to_string(), full_prompt)
-    }
-
-    pub fn build_full_context(&self, user_input: &str) -> String {
-        format!(
-            "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\n{}{}{}<|im_end|>\n<|im_start|>assistant\n",
-            self.system_prompt,
-            self.prompt_prefix,
-            user_input.trim(),
-            self.prompt_suffix
-        )
+    /// The template's system message plus the user input wrapped in the
+    /// template's prefix/suffix, ready for the engine's chat renderer.
+    pub fn messages(&self, user_input: &str) -> Vec<ChatMessage> {
+        vec![
+            ChatMessage::system(self.system_prompt),
+            ChatMessage::user(format!(
+                "{}{}{}",
+                self.prompt_prefix,
+                user_input.trim(),
+                self.prompt_suffix
+            )),
+        ]
     }
 }

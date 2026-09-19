@@ -8,20 +8,26 @@ use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
 use std::num::NonZeroU32;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::chat::{ChatMessage, ChatRenderer};
 use crate::engine::{
-    boost_thread_qos, build_sampler, GenerationConfig, KvQuantMode, ModelEngine, PrefixCache,
-    SharedBackend, StreamEvent,
+    boost_thread_qos, build_sampler, load_model_fitted, GenerationConfig, KvQuantMode, MemoryPlan,
+    ModelEngine, PrefixCache, SharedBackend, StreamEvent,
 };
 use crate::hardware::SiliconProfile;
 
 /// llama.cpp tolerates small vocab-size differences between draft and target
 /// (padding rows); anything larger means the models do not share a tokenizer.
 const MAX_VOCAB_SIZE_DIFF: i32 = 128;
+
+/// Adaptive draft length bounds. Grows by one after a round where every draft
+/// token was accepted, shrinks by one after an early rejection.
+const MIN_DRAFT: usize = 1;
+const MAX_DRAFT: usize = 16;
 
 /// Persistent context plus the mirror of what is in its KV cache.
 struct ModelSlot {
@@ -42,12 +48,13 @@ pub struct SpeculativeEngine {
     backend: Arc<SharedBackend>,
     pub target_model: Arc<LlamaModel>,
     pub draft_model: Arc<LlamaModel>,
-    #[allow(dead_code)]
+    chat: ChatRenderer,
     pub n_gpu_layers: u32,
     pub use_mlock: bool,
     pub kv_mode: KvQuantMode,
-    pub n_ctx: u32,
-    pub n_draft: usize,
+    pub n_ctx: AtomicU32,
+    /// Current draft length; adapts between rounds and persists across calls.
+    n_draft: AtomicUsize,
 }
 
 unsafe impl Send for SpeculativeEngine {}
@@ -59,20 +66,29 @@ impl SpeculativeEngine {
         draft_path: &Path,
         n_gpu_layers: u32,
         use_mlock: bool,
+        kv_mode: KvQuantMode,
         n_ctx: u32,
         n_draft: usize,
     ) -> Result<Self> {
         let backend = SharedBackend::get()?;
+        let plan = MemoryPlan::for_model(target_path, use_mlock);
+        plan.report();
+        let use_mlock = plan.use_mlock;
 
-        let model_params = LlamaModelParams::default()
+        let target_model = load_model_fitted(&backend, target_path, n_gpu_layers, use_mlock, n_ctx)?;
+        // The draft is small; pin it fully alongside the target.
+        let draft_params = LlamaModelParams::default()
             .with_n_gpu_layers(n_gpu_layers)
             .with_use_mlock(use_mlock);
-
-        let target_model = LlamaModel::load_from_file(&backend, target_path, &model_params)?;
-        let draft_model = LlamaModel::load_from_file(&backend, draft_path, &model_params)?;
+        let draft_model = LlamaModel::load_from_file(&backend, draft_path, &draft_params)?;
         Self::check_vocab_compat(&target_model, &draft_model)?;
 
-        let kv_mode = ModelEngine::resolve_auto_kv(&target_model);
+        let kv_mode = if kv_mode == KvQuantMode::Auto {
+            ModelEngine::resolve_auto_kv(&target_model)
+        } else {
+            kv_mode
+        };
+        let chat = ChatRenderer::detect(&target_model);
 
         Ok(Self {
             target: Mutex::new(ModelSlot { ctx: None, cache: PrefixCache::default() }),
@@ -80,11 +96,12 @@ impl SpeculativeEngine {
             backend,
             target_model: Arc::new(target_model),
             draft_model: Arc::new(draft_model),
+            chat,
             n_gpu_layers,
             use_mlock,
             kv_mode,
-            n_ctx,
-            n_draft: n_draft.max(1),
+            n_ctx: AtomicU32::new(n_ctx),
+            n_draft: AtomicUsize::new(n_draft.clamp(MIN_DRAFT, MAX_DRAFT)),
         })
     }
 
@@ -114,7 +131,6 @@ impl SpeculativeEngine {
     }
 
     /// Explicitly clear both prefix caches
-    #[allow(dead_code)]
     pub fn clear_cache(&self) {
         for slot in [&self.target, &self.draft] {
             if let Ok(mut s) = slot.lock() {
@@ -126,10 +142,37 @@ impl SpeculativeEngine {
         }
     }
 
+    /// Drop both contexts so they are rebuilt at the new size on next use.
+    pub fn reconfigure_context(&self, new_n_ctx: u32) -> Result<()> {
+        for slot in [&self.target, &self.draft] {
+            let mut s = slot.lock().unwrap();
+            s.ctx = None;
+            s.cache.tokens.clear();
+        }
+        self.n_ctx.store(new_n_ctx, Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub fn chat_format_label(&self) -> &'static str {
+        self.chat.label()
+    }
+
+    pub fn stream_chat(
+        &self,
+        messages: &[ChatMessage],
+        config: &GenerationConfig,
+        cancel_token: Arc<AtomicBool>,
+        tx: UnboundedSender<StreamEvent>,
+    ) -> Result<()> {
+        let n_ctx = self.n_ctx.load(Ordering::Relaxed) as usize;
+        let prompt = self.chat.render_fitting(&self.target_model, messages, n_ctx, config.max_tokens);
+        self.stream_generate(&prompt, config, cancel_token, tx)
+    }
+
     fn context_params(&self, n_batch: u32, n_ubatch: u32) -> LlamaContextParams {
         let p_cores = SiliconProfile::detect().p_cores.max(1) as i32;
         LlamaContextParams::default()
-            .with_n_ctx(Some(NonZeroU32::new(self.n_ctx).unwrap()))
+            .with_n_ctx(Some(NonZeroU32::new(self.n_ctx.load(Ordering::Relaxed)).unwrap()))
             .with_n_threads(p_cores)
             .with_n_threads_batch(p_cores)
             .with_n_batch(n_batch)
@@ -179,9 +222,10 @@ impl SpeculativeEngine {
             let _ = tx.send(StreamEvent::Done);
             return Ok(());
         }
-        let n_ctx = self.n_ctx as usize;
-        // Room for the pending token plus a full draft on every round
-        let reserve = self.n_draft + 2;
+        let n_ctx_val = self.n_ctx.load(Ordering::Relaxed);
+        let n_ctx = n_ctx_val as usize;
+        // Room for the pending token plus the largest draft on every round
+        let reserve = MAX_DRAFT + 2;
         if n_prompt + reserve >= n_ctx {
             let _ = tx.send(StreamEvent::Error(format!(
                 "Prompt ({n_prompt} tokens) does not fit in the {n_ctx}-token context"
@@ -189,7 +233,7 @@ impl SpeculativeEngine {
             bail!("Prompt exceeds context");
         }
 
-        let n_batch = 2048.min(self.n_ctx);
+        let n_batch = 2048.min(n_ctx_val);
         let n_ubatch = 512.min(n_batch);
         let batch_size = (n_batch as usize).min(512);
 
@@ -203,7 +247,7 @@ impl SpeculativeEngine {
         let t_ctx = t_ctx.as_mut().unwrap();
         let d_ctx = d_ctx.as_mut().unwrap();
 
-        let mut t_batch = LlamaBatch::new(batch_size.max(self.n_draft + 1), 1);
+        let mut t_batch = LlamaBatch::new(batch_size.max(MAX_DRAFT + 1), 1);
         let mut d_batch = LlamaBatch::new(batch_size, 1);
 
         let prefix_tokens_reused = t_cache.sync(t_ctx, &prompt_tokens);
@@ -226,6 +270,7 @@ impl SpeculativeEngine {
         let mut total_generated = 0usize;
         let mut drafted = 0usize;
         let mut accepted = 0usize;
+        let mut n_draft = self.n_draft.load(Ordering::Relaxed);
 
         let mut emit = |tok: LlamaToken, total: &mut usize| {
             *total += 1;
@@ -268,14 +313,14 @@ impl SpeculativeEngine {
             }
 
             // b. Draft up to n_draft tokens greedily
-            let mut cands: Vec<LlamaToken> = Vec::with_capacity(self.n_draft);
-            while cands.len() < self.n_draft {
+            let mut cands: Vec<LlamaToken> = Vec::with_capacity(n_draft);
+            while cands.len() < n_draft {
                 let d_tok = draft_sampler.sample(d_ctx, -1);
                 if self.draft_model.is_eog_token(d_tok) {
                     break;
                 }
                 cands.push(d_tok);
-                if cands.len() == self.n_draft {
+                if cands.len() == n_draft {
                     break;
                 }
                 d_batch.clear();
@@ -320,14 +365,26 @@ impl SpeculativeEngine {
 
             // Evict rejected draft tokens from the target KV
             let keep = t_cache.tokens.len();
+            let n_acc = keep - n_past - 1;
             t_cache.rollback(t_ctx, keep);
             if finished {
                 break;
             }
 
+            // Adapt: a clean sweep earns a longer draft, an early miss a shorter one
+            if !cands.is_empty() {
+                if n_acc == cands.len() {
+                    n_draft = (n_draft + 1).min(MAX_DRAFT);
+                } else if n_acc + 1 < cands.len() {
+                    n_draft = n_draft.saturating_sub(1).max(MIN_DRAFT);
+                }
+            }
+
             pending = next;
             emit(pending, &mut total_generated);
         }
+
+        self.n_draft.store(n_draft, Ordering::Relaxed);
 
         // 5. Stats
         let ttft_ms = first_token_time.duration_since(start_time).as_millis();
@@ -349,13 +406,13 @@ impl SpeculativeEngine {
             total_tokens: total_generated,
             prompt_tokens: n_prompt,
             context_used: t_cache.tokens.len(),
-            context_capacity: self.n_ctx,
+            context_capacity: n_ctx_val,
             prefix_tokens_reused,
             prefix_cache_hit: prefix_tokens_reused > 0,
             kv_type: format!(
                 "{} · Speculative K={} (acc {:.0}%)",
                 self.kv_mode.label(),
-                self.n_draft,
+                n_draft,
                 acceptance
             ),
             mlock_active: self.use_mlock,

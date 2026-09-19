@@ -8,12 +8,18 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::chat::ChatMessage;
 use crate::engine::{GenerationConfig, StreamEvent};
 
 pub struct MlxEngine {
     pub model_path: PathBuf,
     pub model_name: String,
     pub port: u16,
+    /// From the model's `config.json`; 0 if unknown.
+    pub n_layers: u32,
+    /// Context size the caller asked for; mlx_lm manages its own cache, this is
+    /// only reported back in stats.
+    pub n_ctx: u32,
     process: Arc<Mutex<Option<Child>>>,
     client: reqwest::Client,
 }
@@ -142,8 +148,13 @@ impl MlxEngine {
     }
 
     /// Load and launch the Apple MLX model server as an optimized background process
-    pub fn load(model_path: &Path) -> Result<Self> {
+    pub fn load(model_path: &Path, n_ctx: u32) -> Result<Self> {
         let (cmd_bin, cmd_base_args) = Self::resolve_mlx_command()?;
+        let n_layers = std::fs::read_to_string(model_path.join("config.json"))
+            .ok()
+            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+            .and_then(|v| v.get("num_hidden_layers").and_then(|n| n.as_u64()))
+            .unwrap_or(0) as u32;
         let port = Self::allocate_local_port()?;
 
         let model_name = model_path
@@ -191,6 +202,8 @@ impl MlxEngine {
             model_path: model_path.to_path_buf(),
             model_name,
             port,
+            n_layers,
+            n_ctx,
             process,
             client,
         })
@@ -248,7 +261,8 @@ impl MlxEngine {
         messages
     }
 
-    /// Stream generation via Apple MLX HTTP Server with TTFT, tokens/sec, and prefix caching stats
+    /// Raw-prompt entry point: recovers chat turns from ChatML markup. Prefer
+    /// [`Self::stream_chat`].
     pub fn stream_generate_with_config(
         &self,
         prompt: &str,
@@ -257,6 +271,31 @@ impl MlxEngine {
         tx: UnboundedSender<StreamEvent>,
     ) -> Result<()> {
         let messages = Self::parse_prompt_to_messages(prompt);
+        self.stream_messages(messages, config, cancel_token, tx)
+    }
+
+    /// Stream a conversation; mlx_lm applies the model's own chat template.
+    pub fn stream_chat(
+        &self,
+        messages: &[ChatMessage],
+        config: &GenerationConfig,
+        cancel_token: Arc<AtomicBool>,
+        tx: UnboundedSender<StreamEvent>,
+    ) -> Result<()> {
+        let messages = messages
+            .iter()
+            .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+            .collect();
+        self.stream_messages(messages, config, cancel_token, tx)
+    }
+
+    fn stream_messages(
+        &self,
+        messages: Vec<serde_json::Value>,
+        config: &GenerationConfig,
+        cancel_token: Arc<AtomicBool>,
+        tx: UnboundedSender<StreamEvent>,
+    ) -> Result<()> {
         let url = format!("http://127.0.0.1:{}/v1/chat/completions", self.port);
 
         let body = serde_json::json!({
@@ -273,6 +312,7 @@ impl MlxEngine {
         });
 
         let client = self.client.clone();
+        let n_ctx = self.n_ctx;
         let cancel_clone = cancel_token.clone();
         let tx_clone = tx.clone();
 
@@ -298,6 +338,7 @@ impl MlxEngine {
             let mut ttft_ms = 0;
             let mut token_count = 0;
             let mut cached_tokens = 0;
+            let mut prompt_tokens = 0usize;
             let mut in_reasoning = false;
             let mut recent_chars: Vec<char> = Vec::new();
 
@@ -339,6 +380,9 @@ impl MlxEngine {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
                             // Extract cached tokens usage if present
                             if let Some(usage) = v.get("usage") {
+                                if let Some(pt) = usage.get("prompt_tokens").and_then(|c| c.as_u64()) {
+                                    prompt_tokens = pt as usize;
+                                }
                                 if let Some(details) = usage.get("prompt_tokens_details") {
                                     if let Some(ct) = details.get("cached_tokens").and_then(|c| c.as_u64()) {
                                         cached_tokens = ct as usize;
@@ -435,13 +479,13 @@ impl MlxEngine {
                 ttft_ms,
                 tokens_per_sec: tps,
                 total_tokens: token_count,
-                prompt_tokens: 512,
-                context_used: token_count + 512,
-                context_capacity: 32768,
+                prompt_tokens,
+                context_used: token_count + prompt_tokens,
+                context_capacity: n_ctx,
                 prefix_tokens_reused: cached_tokens,
                 prefix_cache_hit: cached_tokens > 0,
-                kv_type: "Apple MLX Unified RAM".to_string(),
-                mlock_active: true,
+                kv_type: "MLX (managed by mlx_lm)".to_string(),
+                mlock_active: false,
             });
             let _ = tx_clone.send(StreamEvent::Done);
         });

@@ -269,14 +269,10 @@ impl<'a> App<'a> {
             prefix_hit: false,
         });
 
-        // Format prompt according to active template
-        let full_prompt = match self.mode {
+        // Build the conversation; the engine renders it with the model's template
+        let messages: Vec<crate::chat::ChatMessage> = match self.mode {
             AppMode::Chat => {
-                // Multi-turn context representation
-                let mut prompt_ctx = format!(
-                    "<|im_start|>system\n{}<|im_end|>\n",
-                    self.active_template.system_prompt
-                );
+                let mut msgs = vec![crate::chat::ChatMessage::system(self.active_template.system_prompt)];
                 let history_len = self.chat_history.len();
                 for (i, msg) in self.chat_history.iter().enumerate() {
                     let text = if i + 1 == history_len && msg.role == "user" {
@@ -284,15 +280,11 @@ impl<'a> App<'a> {
                     } else {
                         &msg.content
                     };
-                    prompt_ctx.push_str(&format!(
-                        "<|im_start|>{}\n{}<|im_end|>\n",
-                        msg.role, text
-                    ));
+                    msgs.push(crate::chat::ChatMessage::new(msg.role.clone(), text.clone()));
                 }
-                prompt_ctx.push_str("<|im_start|>assistant\n");
-                prompt_ctx
+                msgs
             }
-            _ => self.active_template.build_full_context(&engine_prompt_content),
+            _ => self.active_template.messages(&engine_prompt_content),
         };
 
         // Reset stream state
@@ -325,7 +317,7 @@ impl<'a> App<'a> {
         // Spawn inference generation on blocking background thread
         tokio::task::spawn_blocking(move || {
             let tx_err = tx.clone();
-            if let Err(e) = engine.stream_generate_with_config(&full_prompt, &config, cancel_token, tx) {
+            if let Err(e) = engine.stream_chat(&messages, &config, cancel_token, tx) {
                 let _ = tx_err.send(StreamEvent::Error(e.to_string()));
             }
         });
