@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[command(
     name = "nirvana-code",
     about = "⚡ Nirvana Code: Ultra-low latency Apple Silicon coding assistant & prompt engineering engine with Metal 3, Q8_0 KV-Cache, Prefix Caching, and Speculative Decoding.",
-    version = "0.2.0"
+    version = env!("CARGO_PKG_VERSION")
 )]
 pub struct Cli {
     #[arg(short = 'm', long = "model", global = true, help = "Path to GGUF model file or catalog ID")]

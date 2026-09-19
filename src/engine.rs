@@ -250,7 +250,7 @@ impl ModelEngine {
         let prompt_tokens = match self.model.str_to_token(prompt, AddBos::Always) {
             Ok(tokens) => tokens,
             Err(e) => {
-                let err_msg = format!("Tokenization failed: {}", e);
+                let err_msg = format!("Tokenization failed: {e}");
                 let _ = tx.send(StreamEvent::Error(err_msg));
                 bail!("Tokenization failed");
             }

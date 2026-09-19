@@ -92,7 +92,7 @@ impl MlxEngine {
         process: &Arc<Mutex<Option<Child>>>,
     ) -> Result<()> {
         let start_wait = Instant::now();
-        let addr_str = format!("127.0.0.1:{}", port);
+        let addr_str = format!("127.0.0.1:{port}");
         let sock_addr: SocketAddr = addr_str
             .parse()
             .context("Failed to parse local server address")?;
@@ -118,8 +118,7 @@ impl MlxEngine {
             // Try TCP connection and HTTP GET request
             if let Ok(mut stream) = TcpStream::connect_timeout(&sock_addr, Duration::from_millis(300)) {
                 let req = format!(
-                    "GET /v1/models HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-                    addr_str
+                    "GET /v1/models HTTP/1.1\r\nHost: {addr_str}\r\nConnection: close\r\n\r\n"
                 );
                 if stream.write_all(req.as_bytes()).is_ok() {
                     let mut resp_buf = [0u8; 256];
@@ -138,8 +137,7 @@ impl MlxEngine {
         }
 
         bail!(
-            "Timed out waiting for MLX model server to initialize on port {}",
-            port
+            "Timed out waiting for MLX model server to initialize on port {port}"
         );
     }
 
@@ -170,7 +168,7 @@ impl MlxEngine {
 
         let child = cmd
             .spawn()
-            .with_context(|| format!("Failed to spawn MLX server process using {}", cmd_bin))?;
+            .with_context(|| format!("Failed to spawn MLX server process using {cmd_bin}"))?;
 
         let process = Arc::new(Mutex::new(Some(child)));
 
@@ -283,14 +281,14 @@ impl MlxEngine {
             let res = match client.post(&url).json(&body).send().await {
                 Ok(r) => r,
                 Err(e) => {
-                    let _ = tx_clone.send(StreamEvent::Error(format!("MLX connection failed: {}", e)));
+                    let _ = tx_clone.send(StreamEvent::Error(format!("MLX connection failed: {e}")));
                     return;
                 }
             };
 
             if !res.status().is_success() {
                 let err_text = res.text().await.unwrap_or_else(|_| "Unknown HTTP error".to_string());
-                let _ = tx_clone.send(StreamEvent::Error(format!("MLX server error: {}", err_text)));
+                let _ = tx_clone.send(StreamEvent::Error(format!("MLX server error: {err_text}")));
                 return;
             }
 
@@ -312,7 +310,7 @@ impl MlxEngine {
                     Ok(Some(c)) => c,
                     Ok(None) => break,
                     Err(e) => {
-                        let _ = tx_clone.send(StreamEvent::Error(format!("MLX stream read error: {}", e)));
+                        let _ = tx_clone.send(StreamEvent::Error(format!("MLX stream read error: {e}")));
                         return;
                     }
                 };

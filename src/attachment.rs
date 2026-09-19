@@ -100,16 +100,16 @@ impl Attachment {
             AttachmentType::Image => {
                 let (dimensions, text) = extract_image(&path)?;
                 let meta = if dimensions.is_empty() {
-                    format!("{} • Vision OCR", size_str)
+                    format!("{size_str} • Vision OCR")
                 } else {
-                    format!("{} • {} • Vision OCR", size_str, dimensions)
+                    format!("{size_str} • {dimensions} • Vision OCR")
                 };
                 (meta, text)
             }
             AttachmentType::Document => {
                 let text = extract_document(&path)?;
                 let lines = text.lines().count();
-                let meta = format!("{} • {} lines", size_str, lines);
+                let meta = format!("{size_str} • {lines} lines");
                 (meta, text)
             }
             AttachmentType::Code => {
@@ -121,7 +121,7 @@ impl Attachment {
             AttachmentType::Text => {
                 let text = extract_code_or_text(&path)?;
                 let lines = text.lines().count();
-                let meta = format!("{} • {} lines", size_str, lines);
+                let meta = format!("{size_str} • {lines} lines");
                 (meta, text)
             }
         };
@@ -261,7 +261,7 @@ pub fn resolve_path(input: &Path) -> Result<PathBuf> {
 
 fn format_size(bytes: u64) -> String {
     if bytes < 1024 {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     } else if bytes < 1024 * 1024 {
         format!("{:.1} KB", bytes as f64 / 1024.0)
     } else if bytes < 1024 * 1024 * 1024 {
@@ -348,7 +348,7 @@ print(fullText)
             let msg = if extracted.is_empty() {
                 format!("(PDF document '{}', {} bytes)", path.display(), raw_bytes.len())
             } else {
-                format!("(PDF stream extract):\n{}", extracted)
+                format!("(PDF stream extract):\n{extracted}")
             };
             Ok((1, msg))
         }
@@ -378,7 +378,7 @@ fn extract_image(path: &Path) -> Result<(String, String)> {
                 }
             }
             if !w.is_empty() && !h.is_empty() {
-                dimensions = format!("{}x{}", w, h);
+                dimensions = format!("{w}x{h}");
             }
         }
     }
@@ -449,8 +449,7 @@ fn extract_document(path: &Path) -> Result<String> {
                 if text.chars().count() > 25000 {
                     let truncated: String = text.chars().take(25000).collect();
                     return Ok(format!(
-                        "{}\n\n[... Document truncated at 25,000 chars to fit model context ...]",
-                        truncated
+                        "{truncated}\n\n[... Document truncated at 25,000 chars to fit model context ...]"
                     ));
                 }
                 return Ok(text);
@@ -468,8 +467,7 @@ fn extract_code_or_text(path: &Path) -> Result<String> {
     if text.chars().count() > 25000 {
         let truncated: String = text.chars().take(25000).collect();
         Ok(format!(
-            "{}\n\n[... File truncated at 25,000 characters to fit model context ...]",
-            truncated
+            "{truncated}\n\n[... File truncated at 25,000 characters to fit model context ...]"
         ))
     } else {
         Ok(text)

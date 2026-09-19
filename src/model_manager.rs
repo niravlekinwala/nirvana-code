@@ -279,7 +279,7 @@ impl ModelManager {
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "mlx-model".to_string());
-                let name = format!("{} [MLX]", folder_name);
+                let name = format!("{folder_name} [MLX]");
                 let size = Self::compute_dir_size(dir);
                 list.push((dir.to_path_buf(), name, size));
             }
@@ -348,7 +348,7 @@ impl ModelManager {
             // 1c. Catalog ID match
             if let Some(meta) = MODEL_CATALOG.iter().find(|m| m.id == target.as_ref()) {
                 for (p, name, _) in &installed {
-                    if name == &meta.filename {
+                    if name == meta.filename {
                         return Some(p.clone());
                     }
                 }
@@ -405,7 +405,7 @@ impl ModelManager {
         if target.starts_with("http://") || target.starts_with("https://") {
             let filename = target
                 .split('/')
-                .last()
+                .next_back()
                 .unwrap_or("custom_model.gguf")
                 .to_string();
             return Self::download_file(&filename, target).await;
@@ -420,8 +420,7 @@ impl ModelManager {
                     || m.name.to_lowercase().contains(&target.to_lowercase())
             })
             .context(format!(
-                "Unknown model target '{}'. Run 'nirvana-code models' to view available models.",
-                target
+                "Unknown model target '{target}'. Run 'nirvana-code models' to view available models."
             ))?;
 
         Self::download_file(meta.filename, meta.url).await
@@ -435,11 +434,11 @@ impl ModelManager {
             return Ok(target_path);
         }
 
-        let temp_path = dir.join(format!("{}.download", filename));
+        let temp_path = dir.join(format!("{filename}.download"));
 
         println!("⚡ [NIRVANA CODE] Downloading Silicon-Optimized Model for Apple Silicon:");
-        println!("   Filename: {}", filename);
-        println!("   URL:      {}", url);
+        println!("   Filename: {filename}");
+        println!("   URL:      {url}");
         println!("   Target:   {}\n", target_path.display());
 
         let client = reqwest::Client::builder()
@@ -453,7 +452,7 @@ impl ModelManager {
             .context("Failed to initiate download stream")?;
         let status = res.status();
         if !status.is_success() {
-            bail!("Download request failed with HTTP status: {}", status);
+            bail!("Download request failed with HTTP status: {status}");
         }
 
         let total_size = res.content_length().unwrap_or(0);
