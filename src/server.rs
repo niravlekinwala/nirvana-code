@@ -400,6 +400,8 @@ pub fn create_router(state: ServerState) -> Router {
     let router = Router::new()
         .route("/", get(handle_index))
         .route("/index.html", get(handle_index))
+        .route("/app.css", get(handle_css))
+        .route("/app.js", get(handle_js))
         .route("/v1/models", get(handle_models))
         .route("/v1/models/load", post(handle_load_model))
         .route("/v1/context", get(handle_get_context).post(handle_set_context))
@@ -486,6 +488,14 @@ async fn handle_process_attachment(
 
 async fn handle_index() -> Html<&'static str> {
     Html(include_str!("web/index.html"))
+}
+
+async fn handle_css() -> ([(header::HeaderName, &'static str); 1], &'static str) {
+    ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], include_str!("web/app.css"))
+}
+
+async fn handle_js() -> ([(header::HeaderName, &'static str); 1], &'static str) {
+    ([(header::CONTENT_TYPE, "application/javascript; charset=utf-8")], include_str!("web/app.js"))
 }
 
 async fn handle_models(State(state): State<ServerState>) -> Json<ModelListResponse> {
