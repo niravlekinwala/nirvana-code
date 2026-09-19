@@ -1,6 +1,6 @@
 [package]
 name = "nirvana-code"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 authors = ["Nirav Lekinwala"]
 description = "Nirvana Code: Ultra-low latency Apple Silicon coding assistant and prompt engineering engine with Metal 3 acceleration, quantized KV caching, prefix caching, and speculative decoding."

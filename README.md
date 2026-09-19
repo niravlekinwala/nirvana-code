@@ -32,11 +32,11 @@ Requires macOS 14+ on Apple Silicon and the Xcode Command Line Tools (`xcode-sel
 
 ```bash
 # From source (recommended until the Homebrew tap is published)
-git clone https://github.com/<you>/nirvana-code && cd nirvana-code
+git clone https://github.com/niravlekinwala/nirvana-code && cd nirvana-code
 cargo install --path .           # uses target-cpu=native for this machine
 
-# Homebrew (formula in packaging/nirvana-code.rb — fill in the release URL and sha256)
-brew install --formula packaging/nirvana-code.rb
+# Homebrew
+brew install niravlekinwala/nirvana/nirvana-code
 ```
 
 For a binary that runs on every M-series chip use `scripts/build-release.sh`, which builds against the M1 baseline and signs it.
