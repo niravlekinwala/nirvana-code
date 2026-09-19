@@ -77,6 +77,7 @@ pub const TEMPLATES: &[PromptTemplate] = &[
 ];
 
 impl PromptTemplate {
+    #[allow(dead_code)]
     pub fn format_prompt(&self, user_input: &str) -> (String, String) {
         let full_prompt = format!(
             "{}{}{}",

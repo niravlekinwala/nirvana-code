@@ -446,10 +446,11 @@ fn extract_document(path: &Path) -> Result<String> {
         if out.status.success() {
             let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !text.is_empty() {
-                if text.len() > 25000 {
+                if text.chars().count() > 25000 {
+                    let truncated: String = text.chars().take(25000).collect();
                     return Ok(format!(
                         "{}\n\n[... Document truncated at 25,000 chars to fit model context ...]",
-                        &text[..25000]
+                        truncated
                     ));
                 }
                 return Ok(text);
@@ -464,10 +465,11 @@ fn extract_document(path: &Path) -> Result<String> {
 fn extract_code_or_text(path: &Path) -> Result<String> {
     let bytes = fs::read(path).with_context(|| format!("Failed to read file: {}", path.display()))?;
     let text = String::from_utf8_lossy(&bytes).to_string();
-    if text.len() > 25000 {
+    if text.chars().count() > 25000 {
+        let truncated: String = text.chars().take(25000).collect();
         Ok(format!(
             "{}\n\n[... File truncated at 25,000 characters to fit model context ...]",
-            &text[..25000]
+            truncated
         ))
     } else {
         Ok(text)

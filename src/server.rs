@@ -35,6 +35,14 @@ pub struct ServerState {
     pub use_mlock: bool,
     pub kv_mode: KvQuantMode,
     pub ctx_size: u32,
+    pub active_cancel: Arc<tokio::sync::Mutex<Option<Arc<AtomicBool>>>>,
+}
+
+struct CancelOnDrop(Arc<AtomicBool>);
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -127,12 +135,72 @@ pub struct ModelCard {
 pub struct ModelListResponse {
     pub object: &'static str,
     pub current_model: String,
+    pub current_ctx_size: u32,
     pub data: Vec<ModelCard>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct LoadModelRequest {
     pub model: String,
+    #[serde(default)]
+    pub ctx_size: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ContextInfoResponse {
+    pub status: String,
+    pub ctx_size: u32,
+    pub model: String,
+    pub backend: String,
+    pub kv_mode: String,
+    pub p_cores: u32,
+    pub gpu_layers: u32,
+    pub mlock: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetContextRequest {
+    pub ctx_size: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProjectScanRequest {
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectFileItem {
+    pub relative_path: String,
+    pub file_name: String,
+    pub size_bytes: u64,
+    pub extension: String,
+    pub is_code: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectScanResponse {
+    pub status: String,
+    pub root_path: String,
+    pub project_name: String,
+    pub project_type: String,
+    pub total_files: usize,
+    pub files: Vec<ProjectFileItem>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProjectFileRequest {
+    pub root_path: String,
+    pub file_path: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectFileResponse {
+    pub status: String,
+    pub file_path: String,
+    pub content: String,
+    pub size_bytes: u64,
+    pub line_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -197,8 +265,13 @@ pub fn create_router(state: ServerState) -> Router {
         .route("/index.html", get(handle_index))
         .route("/v1/models", get(handle_models))
         .route("/v1/models/load", post(handle_load_model))
+        .route("/v1/context", get(handle_get_context).post(handle_set_context))
+        .route("/v1/project/scan", post(handle_project_scan))
+        .route("/v1/project/file", post(handle_project_file))
         .route("/v1/attachments/process", post(handle_process_attachment))
         .route("/v1/chat/completions", post(handle_chat_completions))
+        .route("/v1/chat/stop", post(handle_chat_stop))
+        .route("/v1/engine/reset", post(handle_engine_reset))
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -234,8 +307,9 @@ async fn handle_process_attachment(
 
     match process_res {
         Ok(Ok(att)) => {
-            let preview = if att.extracted_text.len() > 400 {
-                format!("{}...", &att.extracted_text[..400])
+            let preview = if att.extracted_text.chars().count() > 400 {
+                let s: String = att.extracted_text.chars().take(400).collect();
+                format!("{}...", s)
             } else {
                 att.extracted_text.clone()
             };
@@ -281,6 +355,7 @@ async fn handle_models(State(state): State<ServerState>) -> Json<ModelListRespon
     let inner = state.inner.read().await;
     let current_name = inner.model_name.clone();
     let current_path = inner.model_path.clone();
+    let current_ctx_size = inner.engine.n_ctx();
     drop(inner);
 
     let installed = ModelManager::list_installed();
@@ -326,6 +401,7 @@ async fn handle_models(State(state): State<ServerState>) -> Json<ModelListRespon
     Json(ModelListResponse {
         object: "list",
         current_model: current_name,
+        current_ctx_size,
         data,
     })
 }
@@ -363,9 +439,14 @@ async fn handle_load_model(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| target.to_string());
 
+    let ctx_target = req.ctx_size.unwrap_or(state.ctx_size);
+
     {
         let inner = state.inner.read().await;
         if inner.model_path == resolved_path {
+            if let Some(new_ctx) = req.ctx_size {
+                let _ = inner.engine.reconfigure_context(new_ctx);
+            }
             return Json(LoadModelResponse {
                 status: "ok".to_string(),
                 model: model_name,
@@ -383,11 +464,10 @@ async fn handle_load_model(
     let gpu_layers = state.gpu_layers;
     let use_mlock = state.use_mlock;
     let kv_mode = state.kv_mode;
-    let ctx_size = state.ctx_size;
     let path_clone = resolved_path.clone();
 
     let load_res = tokio::task::spawn_blocking(move || {
-        InferenceEngine::load(&path_clone, gpu_layers, use_mlock, kv_mode, ctx_size)
+        InferenceEngine::load(&path_clone, gpu_layers, use_mlock, kv_mode, ctx_target)
     })
     .await;
 
@@ -428,6 +508,340 @@ async fn handle_load_model(
         )
             .into_response(),
     }
+}
+
+async fn handle_get_context(State(state): State<ServerState>) -> Json<ContextInfoResponse> {
+    let inner = state.inner.read().await;
+    let ctx_size = inner.engine.n_ctx();
+    let model = inner.model_name.clone();
+    let backend = inner.engine.backend_name().to_string();
+    let kv_mode = inner.engine.kv_label();
+    let p_cores = crate::hardware::SiliconProfile::detect().p_cores;
+    let gpu_layers = state.gpu_layers;
+    let mlock = state.use_mlock;
+
+    Json(ContextInfoResponse {
+        status: "ok".to_string(),
+        ctx_size,
+        model,
+        backend,
+        kv_mode,
+        p_cores,
+        gpu_layers,
+        mlock,
+    })
+}
+
+async fn handle_set_context(
+    State(state): State<ServerState>,
+    Json(req): Json<SetContextRequest>,
+) -> Response {
+    if req.ctx_size < 512 || req.ctx_size > 262144 {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Context window must be between 512 and 262,144 tokens."
+            })),
+        )
+            .into_response();
+    }
+
+    let inner = state.inner.read().await;
+    let res = inner.engine.reconfigure_context(req.ctx_size);
+    let model_name = inner.model_name.clone();
+    drop(inner);
+
+    match res {
+        Ok(_) => {
+            println!("⚡ User-defined Context Window: {} tokens (Model: {})", req.ctx_size, model_name);
+            Json(serde_json::json!({
+                "status": "ok",
+                "ctx_size": req.ctx_size,
+                "message": format!("Context window successfully set to {} tokens.", req.ctx_size)
+            }))
+            .into_response()
+        }
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("Failed to reconfigure context window: {}", e)
+            })),
+        )
+            .into_response(),
+    }
+}
+
+async fn handle_chat_stop(State(state): State<ServerState>) -> Response {
+    let mut active = state.active_cancel.lock().await;
+    let stopped = if let Some(token) = active.take() {
+        token.store(true, std::sync::atomic::Ordering::Relaxed);
+        true
+    } else {
+        false
+    };
+    Json(serde_json::json!({
+        "status": "ok",
+        "stopped": stopped,
+        "message": if stopped { "Active generation stopped" } else { "No generation was active" }
+    }))
+    .into_response()
+}
+
+async fn handle_engine_reset(State(state): State<ServerState>) -> Response {
+    let mut active = state.active_cancel.lock().await;
+    if let Some(token) = active.take() {
+        token.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    drop(active);
+
+    let inner = state.inner.read().await;
+    inner.engine.clear_cache();
+    let model_name = inner.model_name.clone();
+    drop(inner);
+
+    println!("🛑 [Emergency Reset] Generation aborted and engine cache cleared ({})", model_name);
+
+    Json(serde_json::json!({
+        "status": "ok",
+        "message": "Engine reset and cache cleared successfully"
+    }))
+    .into_response()
+}
+
+async fn handle_project_scan(
+    Json(req): Json<ProjectScanRequest>,
+) -> Response {
+    let root_path_buf = if let Some(ref p) = req.path {
+        let trimmed = p.trim();
+        if trimmed.is_empty() {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        } else {
+            let path = PathBuf::from(trimmed);
+            if path.is_relative() {
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(path)
+            } else {
+                path
+            }
+        }
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    };
+
+    let canonical_root = match root_path_buf.canonicalize() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("Invalid project directory path: {}", e)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    if !canonical_root.is_dir() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Target path is not a directory."
+            })),
+        )
+            .into_response();
+    }
+
+    let project_name = canonical_root
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "project".to_string());
+
+    let project_type = if canonical_root.join("Cargo.toml").exists() {
+        "Rust (Cargo)"
+    } else if canonical_root.join("package.json").exists() {
+        "JavaScript / TypeScript (Node)"
+    } else if canonical_root.join("pyproject.toml").exists() || canonical_root.join("requirements.txt").exists() {
+        "Python"
+    } else if canonical_root.join("go.mod").exists() {
+        "Go"
+    } else if canonical_root.join("Package.swift").exists() {
+        "Swift (SPM)"
+    } else {
+        "Local Project"
+    };
+
+    let mut files = Vec::new();
+    scan_dir_recursive(&canonical_root, &canonical_root, 0, &mut files);
+
+    Json(ProjectScanResponse {
+        status: "ok".to_string(),
+        root_path: canonical_root.display().to_string(),
+        project_name,
+        project_type: project_type.to_string(),
+        total_files: files.len(),
+        files,
+    })
+    .into_response()
+}
+
+fn scan_dir_recursive(root: &Path, current: &Path, depth: usize, out: &mut Vec<ProjectFileItem>) {
+    if depth > 5 || out.len() >= 250 {
+        return;
+    }
+
+    let entries = match std::fs::read_dir(current) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let mut sorted_entries = Vec::new();
+    for entry in entries.flatten() {
+        sorted_entries.push(entry);
+    }
+    sorted_entries.sort_by_key(|e| e.file_name());
+
+    for entry in sorted_entries {
+        if out.len() >= 250 {
+            break;
+        }
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+
+        let file_name = entry.file_name().to_string_lossy().to_string();
+
+        if file_name.starts_with('.')
+            || file_name == "target"
+            || file_name == "node_modules"
+            || file_name == "dist"
+            || file_name == "build"
+            || file_name == "out"
+            || file_name == "__pycache__"
+            || file_name == "vendor"
+        {
+            continue;
+        }
+
+        let path = entry.path();
+        if file_type.is_dir() {
+            scan_dir_recursive(root, &path, depth + 1, out);
+        } else if file_type.is_file() {
+            let rel_path = match path.strip_prefix(root) {
+                Ok(p) => p.to_string_lossy().to_string(),
+                Err(_) => continue,
+            };
+
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+
+            let is_code = matches!(
+                ext.as_str(),
+                "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "go" | "c" | "cpp" | "h" | "hpp"
+                    | "swift" | "java" | "kt" | "rb" | "php" | "sh" | "zsh" | "html" | "css"
+                    | "json" | "yaml" | "yml" | "toml" | "md" | "sql"
+            );
+
+            let size_bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
+
+            out.push(ProjectFileItem {
+                relative_path: rel_path,
+                file_name,
+                size_bytes,
+                extension: ext,
+                is_code,
+            });
+        }
+    }
+}
+
+async fn handle_project_file(
+    Json(req): Json<ProjectFileRequest>,
+) -> Response {
+    let root = Path::new(&req.root_path);
+    let canonical_root = match root.canonicalize() {
+        Ok(c) => c,
+        Err(_) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "Invalid project root path." })),
+            )
+                .into_response();
+        }
+    };
+
+    let target = canonical_root.join(&req.file_path);
+    let canonical_target = match target.canonicalize() {
+        Ok(c) => c,
+        Err(_) => {
+            return (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "File not found." })),
+            )
+                .into_response();
+        }
+    };
+
+    if !canonical_target.starts_with(&canonical_root) {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "Access outside project directory forbidden." })),
+        )
+            .into_response();
+    }
+
+    if !canonical_target.is_file() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "Requested path is not a file." })),
+        )
+            .into_response();
+    }
+
+    let metadata = match std::fs::metadata(&canonical_target) {
+        Ok(m) => m,
+        Err(e) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Failed to read metadata: {}", e) })),
+            )
+                .into_response();
+        }
+    };
+
+    let size_bytes = metadata.len();
+    if size_bytes > 2 * 1024 * 1024 {
+        return (
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({ "error": "File exceeds 2 MB text limit for project view." })),
+        )
+            .into_response();
+    }
+
+    let bytes = match std::fs::read(&canonical_target) {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Failed to read file: {}", e) })),
+            )
+                .into_response();
+        }
+    };
+
+    let content = String::from_utf8_lossy(&bytes).to_string();
+    let line_count = content.lines().count();
+
+    Json(ProjectFileResponse {
+        status: "ok".to_string(),
+        file_path: req.file_path,
+        content,
+        size_bytes,
+        line_count,
+    })
+    .into_response()
 }
 
 fn format_messages_to_prompt(
@@ -597,6 +1011,12 @@ async fn handle_chat_completions(
     let (tx, mut rx) = unbounded_channel();
     let cancel = Arc::new(AtomicBool::new(false));
 
+    // Register active cancel token so /v1/chat/stop can immediately abort
+    {
+        let mut active = state.active_cancel.lock().await;
+        *active = Some(cancel.clone());
+    }
+
     let prompt_clone = prompt.clone();
     let cancel_clone = cancel.clone();
     let engine_clone = engine.clone();
@@ -608,7 +1028,9 @@ async fn handle_chat_completions(
     if payload.stream {
         // Stream SSE tokens
         let model_name_for_stream = active_model_name.clone();
+        let cancel_guard = CancelOnDrop(cancel.clone());
         let stream = async_stream::stream! {
+            let _guard = cancel_guard;
             // First chunk with role
             let initial_chunk = ChatCompletionChunk {
                 id: req_id.clone(),
@@ -646,6 +1068,36 @@ async fn handle_chat_completions(
                         };
                         let json = serde_json::to_string(&chunk).unwrap_or_default();
                         yield Ok(Event::default().data(json));
+                    }
+                    StreamEvent::Stats {
+                        ttft_ms,
+                        tokens_per_sec,
+                        total_tokens,
+                        prompt_tokens,
+                        context_used,
+                        context_capacity,
+                        prefix_tokens_reused,
+                        prefix_cache_hit,
+                        ..
+                    } => {
+                        let stats_json = serde_json::json!({
+                            "id": req_id.clone(),
+                            "object": "chat.completion.chunk",
+                            "created": now,
+                            "model": model_name_for_stream.clone(),
+                            "choices": [],
+                            "stats": {
+                                "ttft_ms": ttft_ms,
+                                "tokens_per_sec": tokens_per_sec,
+                                "total_tokens": total_tokens,
+                                "prompt_tokens": prompt_tokens,
+                                "context_used": context_used,
+                                "context_capacity": context_capacity,
+                                "prefix_tokens_reused": prefix_tokens_reused,
+                                "prefix_cache_hit": prefix_cache_hit,
+                            }
+                        });
+                        yield Ok(Event::default().data(stats_json.to_string()));
                     }
                     StreamEvent::Done { .. } => {
                         let final_chunk = ChatCompletionChunk {
@@ -743,6 +1195,7 @@ pub async fn run_server(
         use_mlock,
         kv_mode,
         ctx_size,
+        active_cancel: Arc::new(tokio::sync::Mutex::new(None)),
     };
 
     let app = create_router(state);

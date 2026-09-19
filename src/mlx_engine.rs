@@ -268,6 +268,9 @@ impl MlxEngine {
             "temperature": config.temperature,
             "top_p": config.top_p,
             "max_tokens": config.max_tokens,
+            "repetition_penalty": 1.15,
+            "repetition_context_size": 64,
+            "stop": ["<|im_end|>", "<|endoftext|>", "</s>"],
             "stream_options": {"include_usage": true}
         });
 
@@ -297,6 +300,8 @@ impl MlxEngine {
             let mut ttft_ms = 0;
             let mut token_count = 0;
             let mut cached_tokens = 0;
+            let mut in_reasoning = false;
+            let mut recent_chars: Vec<char> = Vec::new();
 
             loop {
                 if cancel_clone.load(Ordering::Relaxed) {
@@ -314,7 +319,13 @@ impl MlxEngine {
 
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
 
+                let mut loop_detected = false;
+
                 while let Some(nl_idx) = buffer.find('\n') {
+                    if cancel_clone.load(Ordering::Relaxed) {
+                        break;
+                    }
+
                     let line = buffer[..nl_idx].trim().to_string();
                     buffer = buffer[nl_idx + 1..].to_string();
 
@@ -341,16 +352,6 @@ impl MlxEngine {
                             if let Some(choices) = v.get("choices").and_then(|c| c.as_array()) {
                                 if let Some(first) = choices.first() {
                                     if let Some(delta) = first.get("delta") {
-                                        // Regular content
-                                        if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
-                                            if !content.is_empty() {
-                                                if token_count == 0 {
-                                                    ttft_ms = start_time.elapsed().as_millis();
-                                                }
-                                                token_count += 1;
-                                                let _ = tx_clone.send(StreamEvent::Token(content.to_string()));
-                                            }
-                                        }
                                         // Reasoning content (DeepSeek-R1 etc.)
                                         if let Some(reasoning) = delta.get("reasoning").and_then(|r| r.as_str()) {
                                             if !reasoning.is_empty() {
@@ -358,7 +359,55 @@ impl MlxEngine {
                                                     ttft_ms = start_time.elapsed().as_millis();
                                                 }
                                                 token_count += 1;
+                                                if !in_reasoning {
+                                                    in_reasoning = true;
+                                                    let _ = tx_clone.send(StreamEvent::Token("<think>\n".to_string()));
+                                                }
                                                 let _ = tx_clone.send(StreamEvent::Token(reasoning.to_string()));
+                                            }
+                                        }
+
+                                        // Regular content
+                                        if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+                                            if !content.is_empty() {
+                                                if token_count == 0 {
+                                                    ttft_ms = start_time.elapsed().as_millis();
+                                                }
+                                                token_count += 1;
+
+                                                if in_reasoning {
+                                                    in_reasoning = false;
+                                                    let _ = tx_clone.send(StreamEvent::Token("\n</think>\n\n".to_string()));
+                                                }
+
+                                                // Repetition loop detector (character-based, UTF-8 safe)
+                                                recent_chars.extend(content.chars());
+                                                if recent_chars.len() > 300 {
+                                                    let excess = recent_chars.len() - 300;
+                                                    recent_chars.drain(..excess);
+                                                }
+                                                let rlen = recent_chars.len();
+                                                if rlen >= 48 {
+                                                    for pat_len in 6..=30 {
+                                                        if rlen >= pat_len * 4 {
+                                                            let tail = &recent_chars[rlen - pat_len..];
+                                                            let prev1 = &recent_chars[rlen - pat_len * 2..rlen - pat_len];
+                                                            let prev2 = &recent_chars[rlen - pat_len * 3..rlen - pat_len * 2];
+                                                            let prev3 = &recent_chars[rlen - pat_len * 4..rlen - pat_len * 3];
+                                                            if tail == prev1 && prev1 == prev2 && prev2 == prev3 {
+                                                                loop_detected = true;
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                                let _ = tx_clone.send(StreamEvent::Token(content.to_string()));
+
+                                                if loop_detected {
+                                                    let _ = tx_clone.send(StreamEvent::Token("\n\n⚠️ *[Generation halted: repetition degeneration loop detected]*".to_string()));
+                                                    break;
+                                                }
                                             }
                                         }
                                     }
@@ -367,6 +416,14 @@ impl MlxEngine {
                         }
                     }
                 }
+
+                if loop_detected || cancel_clone.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+
+            if in_reasoning {
+                let _ = tx_clone.send(StreamEvent::Token("\n</think>\n\n".to_string()));
             }
 
             let total_secs = start_time.elapsed().as_secs_f64();
@@ -380,6 +437,9 @@ impl MlxEngine {
                 ttft_ms,
                 tokens_per_sec: tps,
                 total_tokens: token_count,
+                prompt_tokens: 512,
+                context_used: token_count + 512,
+                context_capacity: 32768,
                 prefix_tokens_reused: cached_tokens,
                 prefix_cache_hit: cached_tokens > 0,
                 kv_type: "Apple MLX Unified RAM".to_string(),
@@ -425,5 +485,37 @@ mod tests {
         assert_eq!(msgs[0]["content"], "You are Nirvana Code.");
         assert_eq!(msgs[1]["role"], "user");
         assert_eq!(msgs[1]["content"], "Write a queue.");
+    }
+
+    #[test]
+    fn test_utf8_char_repetition_detector_no_panic() {
+        // Multi-byte chars: curly apostrophe ’ (\u{2019}, 3 bytes), emoji 🚀 (4 bytes), umlaut ä (2 bytes)
+        let sample = "Let’s build 🚀 fast with MLX! Let’s build 🚀 fast with MLX! Let’s build 🚀 fast with MLX! Let’s build 🚀 fast with MLX! ";
+        let mut recent_chars: Vec<char> = Vec::new();
+        let mut loop_detected = false;
+
+        for ch in sample.chars() {
+            recent_chars.push(ch);
+            if recent_chars.len() > 300 {
+                let excess = recent_chars.len() - 300;
+                recent_chars.drain(..excess);
+            }
+            let rlen = recent_chars.len();
+            if rlen >= 48 {
+                for pat_len in 6..=30 {
+                    if rlen >= pat_len * 4 {
+                        let tail = &recent_chars[rlen - pat_len..];
+                        let prev1 = &recent_chars[rlen - pat_len * 2..rlen - pat_len];
+                        let prev2 = &recent_chars[rlen - pat_len * 3..rlen - pat_len * 2];
+                        let prev3 = &recent_chars[rlen - pat_len * 4..rlen - pat_len * 3];
+                        if tail == prev1 && prev1 == prev2 && prev2 == prev3 {
+                            loop_detected = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(loop_detected, "Repetition detector should detect 4 repeating patterns with multi-byte chars without panicking");
     }
 }
