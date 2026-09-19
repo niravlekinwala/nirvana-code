@@ -19,11 +19,11 @@ use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 
 use crate::attachment::Attachment;
-use crate::engine::{GenerationConfig, KvQuantMode, ModelEngine, StreamEvent};
+use crate::engine::{GenerationConfig, InferenceEngine, KvQuantMode, StreamEvent};
 use crate::model_manager::ModelManager;
 
 pub struct ServerEngineInner {
-    pub engine: Arc<ModelEngine>,
+    pub engine: InferenceEngine,
     pub model_name: String,
     pub model_path: PathBuf,
 }
@@ -289,11 +289,16 @@ async fn handle_models(State(state): State<ServerState>) -> Json<ModelListRespon
         if is_active {
             found_current = true;
         }
+        let format_tag = if ModelManager::is_mlx_model(path) {
+            "MLX"
+        } else {
+            "GGUF"
+        };
         data.push(ModelCard {
             id: name.clone(),
             object: "model",
             created: now,
-            owned_by: "nirvana",
+            owned_by: format_tag,
             active: is_active,
             size_bytes: *size,
             display_name: name.clone(),
@@ -368,7 +373,9 @@ async fn handle_load_model(
         }
     }
 
-    println!("⚡ Dynamic Model Switch: Loading {} into Apple Silicon Metal GPU...", model_name);
+    let is_mlx = ModelManager::is_mlx_model(&resolved_path);
+    let backend_name = if is_mlx { "Apple MLX" } else { "Metal GPU" };
+    println!("⚡ Dynamic Model Switch: Loading {} into {}...", model_name, backend_name);
 
     let gpu_layers = state.gpu_layers;
     let use_mlock = state.use_mlock;
@@ -377,25 +384,26 @@ async fn handle_load_model(
     let path_clone = resolved_path.clone();
 
     let load_res = tokio::task::spawn_blocking(move || {
-        ModelEngine::load(&path_clone, gpu_layers, use_mlock, kv_mode, ctx_size)
+        InferenceEngine::load(&path_clone, gpu_layers, use_mlock, kv_mode, ctx_size)
     })
     .await;
 
     match load_res {
         Ok(Ok(new_engine)) => {
+            let badge = new_engine.backend_name();
             let mut inner = state.inner.write().await;
-            inner.engine = Arc::new(new_engine);
+            inner.engine = new_engine;
             inner.model_name = model_name.clone();
             inner.model_path = resolved_path.clone();
             drop(inner);
 
-            println!("✔ Switched active model to {} (Metal GPU Ready)", model_name);
+            println!("✔ Switched active model to {} ({} Ready)", model_name, badge);
 
             Json(LoadModelResponse {
                 status: "ok".to_string(),
                 model: model_name,
                 path: resolved_path.display().to_string(),
-                message: "Model successfully loaded onto Metal GPU".to_string(),
+                message: format!("Model successfully loaded onto {}", badge),
             })
             .into_response()
         }
@@ -517,7 +525,7 @@ async fn handle_chat_completions(
                         let path_clone = new_path.clone();
 
                         let load_res = tokio::task::spawn_blocking(move || {
-                            ModelEngine::load(&path_clone, gpu_layers, use_mlock, kv_mode, ctx_size)
+                            InferenceEngine::load(&path_clone, gpu_layers, use_mlock, kv_mode, ctx_size)
                         })
                         .await;
 
@@ -528,7 +536,7 @@ async fn handle_chat_completions(
                                 .map(|n| n.to_string_lossy().to_string())
                                 .unwrap_or_else(|| req_trim.to_string());
                             inner.model_path = new_path;
-                            inner.engine = Arc::new(new_engine);
+                            inner.engine = new_engine;
                         }
                     }
                 }
@@ -707,7 +715,7 @@ async fn handle_chat_completions(
 }
 
 pub async fn run_server(
-    engine: Arc<ModelEngine>,
+    engine: InferenceEngine,
     model_name: String,
     model_path: PathBuf,
     host: &str,

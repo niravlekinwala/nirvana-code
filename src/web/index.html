@@ -1133,8 +1133,10 @@
           data.data.forEach(m => {
             const opt = document.createElement('option');
             opt.value = m.id;
-            const sizeStr = m.size_bytes ? ` (${Math.round(m.size_bytes / (1024 * 1024))} MB)` : '';
-            opt.textContent = `${m.display_name || m.id}${sizeStr}`;
+            const isMlx = m.owned_by === 'MLX' || (m.display_name && m.display_name.includes('[MLX]'));
+            const backendTag = isMlx ? ' [MLX]' : ' [GGUF]';
+            const sizeStr = m.size_bytes ? ` (${m.size_bytes >= 1073741824 ? (m.size_bytes / (1024*1024*1024)).toFixed(1) + ' GB' : Math.round(m.size_bytes / (1024 * 1024)) + ' MB'})` : '';
+            opt.textContent = `${m.display_name || m.id}${backendTag}${sizeStr}`;
             if (m.active || m.id === current) {
               opt.selected = true;
             }
@@ -1225,6 +1227,13 @@
         data.data.forEach((m, idx) => {
           const isCurrent = m.active || m.id === data.current_model;
           const sizeMb = m.size_bytes ? Math.round(m.size_bytes / (1024 * 1024)) : 0;
+          const sizeLabel = sizeMb >= 1024 ? (sizeMb / 1024).toFixed(1) + ' GB' : sizeMb + ' MB';
+          const isMlx = m.owned_by === 'MLX' || (m.display_name && m.display_name.includes('[MLX]'));
+          const backendBadge = isMlx
+            ? '<span class="badge" style="background: rgba(255, 100, 200, 0.15); color: #ff66cc; border: 1px solid rgba(255, 100, 200, 0.4); margin-left: 8px; font-size: 10px; padding: 2px 6px;">Apple MLX</span>'
+            : '<span class="badge" style="background: rgba(0, 240, 255, 0.15); color: var(--neon-cyan); border: 1px solid rgba(0, 240, 255, 0.4); margin-left: 8px; font-size: 10px; padding: 2px 6px;">Metal 3 GGUF</span>';
+          const backendDesc = isMlx ? 'Apple Silicon MLX &bull; GPU Unified Memory' : 'Apple Silicon Metal 3 GPU &bull; Unified Memory';
+
           const card = document.createElement('div');
           card.style.background = isCurrent ? 'rgba(0, 255, 159, 0.08)' : 'rgba(255, 255, 255, 0.03)';
           card.style.border = `1px solid ${isCurrent ? 'var(--neon-green)' : 'var(--border-dim)'}`;
@@ -1237,12 +1246,13 @@
 
           const info = document.createElement('div');
           info.innerHTML = `
-            <div>
+            <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 4px;">
               <span style="color: var(--neon-amber); font-weight: 700; margin-right: 6px;">[${idx + 1}]</span>
               <strong style="color: ${isCurrent ? 'var(--neon-green)' : 'var(--text-bright)'}; font-size: 13px;">${m.display_name || m.id}</strong>
+              ${backendBadge}
             </div>
             <div style="font-size: 11px; color: var(--text-dim); margin-top: 3px;">
-              ${sizeMb} MB &bull; Apple Silicon Metal 3 GPU &bull; Unified Memory
+              ${sizeLabel} &bull; ${backendDesc}
             </div>
           `;
 

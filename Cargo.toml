@@ -18,7 +18,7 @@ dirs = "6.0"
 tui-textarea = "0.7"
 encoding_rs = "0.8"
 indicatif = "0.17"
-reqwest = { version = "0.12", features = ["stream"] }
+reqwest = { version = "0.12", features = ["stream", "json"] }
 futures-util = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

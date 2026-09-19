@@ -93,7 +93,7 @@ fn draw_header_hud(f: &mut Frame, app: &App, area: Rect) {
 
     let badges = vec![
         Span::styled(
-            format!(" {} ", app.engine.kv_mode.label()),
+            format!(" {} ", app.engine.kv_label()),
             app.theme.badge_style(),
         ),
         Span::raw(" "),
@@ -229,9 +229,9 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
             ),
         ]),
         Line::from(vec![
-            Span::styled("Layers: ", Style::default().fg(app.theme.text_muted)),
+            Span::styled("Engine: ", Style::default().fg(app.theme.text_muted)),
             Span::styled(
-                format!("{}/{} on Metal 3 GPU", offloaded, total),
+                format!("{}/{} ({})", offloaded, total, app.engine.backend_name()),
                 Style::default().fg(app.theme.neon_green).add_modifier(Modifier::BOLD),
             ),
         ]),
@@ -245,7 +245,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![
             Span::styled("KV Cache: ", Style::default().fg(app.theme.text_muted)),
             Span::styled(
-                app.engine.kv_mode.label(),
+                app.engine.kv_label(),
                 Style::default().fg(app.theme.neon_amber).add_modifier(Modifier::BOLD),
             ),
         ]),

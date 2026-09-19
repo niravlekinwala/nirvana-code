@@ -15,6 +15,8 @@ use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::hardware::SiliconProfile;
+use crate::mlx_engine::MlxEngine;
+use crate::model_manager::ModelManager;
 
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
@@ -518,3 +520,108 @@ impl ModelEngine {
         Ok(())
     }
 }
+
+#[derive(Clone)]
+pub enum InferenceEngine {
+    Gguf(Arc<ModelEngine>),
+    Mlx(Arc<MlxEngine>),
+}
+
+impl InferenceEngine {
+    pub fn load(
+        model_path: &Path,
+        gpu_layers: u32,
+        use_mlock: bool,
+        kv_mode: KvQuantMode,
+        ctx_size: u32,
+    ) -> Result<Self> {
+        if ModelManager::is_mlx_model(model_path) {
+            let mlx = MlxEngine::load(model_path)?;
+            Ok(InferenceEngine::Mlx(Arc::new(mlx)))
+        } else {
+            let gguf = ModelEngine::load(model_path, gpu_layers, use_mlock, kv_mode, ctx_size)?;
+            Ok(InferenceEngine::Gguf(Arc::new(gguf)))
+        }
+    }
+
+    pub fn stream_generate_with_config(
+        &self,
+        prompt: &str,
+        config: &GenerationConfig,
+        cancel_token: Arc<AtomicBool>,
+        tx: UnboundedSender<StreamEvent>,
+    ) -> Result<()> {
+        match self {
+            InferenceEngine::Gguf(e) => e.stream_generate_with_config(prompt, config, cancel_token, tx),
+            InferenceEngine::Mlx(e) => e.stream_generate_with_config(prompt, config, cancel_token, tx),
+        }
+    }
+
+    pub fn clear_cache(&self) {
+        match self {
+            InferenceEngine::Gguf(e) => e.clear_cache(),
+            InferenceEngine::Mlx(e) => e.clear_cache(),
+        }
+    }
+
+    pub fn backend_name(&self) -> &'static str {
+        match self {
+            InferenceEngine::Gguf(_) => "Metal GGUF",
+            InferenceEngine::Mlx(_) => "Apple MLX",
+        }
+    }
+
+    pub fn kv_label(&self) -> String {
+        match self {
+            InferenceEngine::Gguf(e) => e.kv_mode.label().to_string(),
+            InferenceEngine::Mlx(_) => "Unified LPDDR5 (Apple MLX)".to_string(),
+        }
+    }
+
+    pub fn is_mlx(&self) -> bool {
+        matches!(self, InferenceEngine::Mlx(_))
+    }
+
+    pub fn total_layers(&self) -> u32 {
+        match self {
+            InferenceEngine::Gguf(e) => e.total_layers(),
+            InferenceEngine::Mlx(_) => 32,
+        }
+    }
+
+    pub fn offloaded_layers(&self) -> u32 {
+        match self {
+            InferenceEngine::Gguf(e) => e.offloaded_layers(),
+            InferenceEngine::Mlx(_) => 32,
+        }
+    }
+
+    pub fn n_gpu_layers(&self) -> u32 {
+        match self {
+            InferenceEngine::Gguf(e) => e.n_gpu_layers,
+            InferenceEngine::Mlx(_) => 32,
+        }
+    }
+
+    pub fn use_mlock(&self) -> bool {
+        match self {
+            InferenceEngine::Gguf(e) => e.use_mlock,
+            InferenceEngine::Mlx(_) => true,
+        }
+    }
+
+    pub fn kv_mode(&self) -> KvQuantMode {
+        match self {
+            InferenceEngine::Gguf(e) => e.kv_mode,
+            InferenceEngine::Mlx(_) => KvQuantMode::Auto,
+        }
+    }
+
+    pub fn n_ctx(&self) -> u32 {
+        match self {
+            InferenceEngine::Gguf(e) => e.n_ctx,
+            InferenceEngine::Mlx(_) => 32768,
+        }
+    }
+}
+
