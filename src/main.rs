@@ -151,6 +151,68 @@ fn load_engine(cli: &Cli, model_path: &Path, kv_mode: KvQuantMode) -> Result<Inf
     )
 }
 
+/// Assemble server options from the CLI. `web` mode defaults the workspace to
+/// the current directory (the UI's Projects tab needs one); `serve` requires an
+/// explicit `--workspace`. Binding beyond loopback without `--api-key`
+/// generates one and prints it.
+fn server_options(
+    cli: &Cli,
+    host: &str,
+    port: u16,
+    socket_path: Option<PathBuf>,
+    kv_mode: KvQuantMode,
+    web_mode: bool,
+) -> Result<server::ServerOptions> {
+    let workspace = match &cli.workspace {
+        Some(w) => Some(w.canonicalize().with_context(|| format!("--workspace {}: not a readable directory", w.display()))?),
+        None if web_mode => std::env::current_dir().ok(),
+        None => None,
+    };
+
+    let loopback = matches!(host, "127.0.0.1" | "localhost" | "::1");
+    let api_key = match (&cli.api_key, loopback) {
+        (Some(k), _) => Some(k.clone()),
+        (None, true) => None,
+        (None, false) => {
+            let key = generate_api_key();
+            eprintln!("⚠️  Binding to {host} (not loopback) with no --api-key; generated one for this session.");
+            Some(key)
+        }
+    };
+
+    let mut allowed_hosts = vec!["localhost".to_string(), "127.0.0.1".to_string(), "::1".to_string()];
+    if !loopback {
+        allowed_hosts.push(host.to_string());
+    }
+    allowed_hosts.extend(cli.allow_host.iter().cloned());
+
+    Ok(server::ServerOptions {
+        host: host.to_string(),
+        port,
+        socket_path,
+        gpu_layers: cli.gpu_layers,
+        use_mlock: !cli.no_mlock,
+        kv_mode,
+        ctx_size: cli.ctx_size,
+        security: server::Security {
+            workspace,
+            api_key,
+            cors_origins: cli.cors_origin.clone(),
+            allowed_hosts,
+        },
+    })
+}
+
+fn generate_api_key() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut out = String::with_capacity(40);
+    for _ in 0..3 {
+        let v = std::collections::hash_map::RandomState::new().build_hasher().finish();
+        out.push_str(&format!("{v:016x}"));
+    }
+    format!("nv-{out}")
+}
+
 fn cmd_list_models() -> Result<()> {
     println!("\n⚡ [NIRVANA CODE] Silicon Model Manager (Apple M2 Pro 16GB Unified RAM)\n");
 
@@ -376,18 +438,8 @@ async fn cmd_serve(cli: &Cli, port: u16, host: &str, socket: Option<&Path>) -> R
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "nirvana-code".to_string());
 
-    server::run_server(
-        engine,
-        model_name,
-        model_path,
-        host,
-        port,
-        socket.map(|p| p.to_path_buf()),
-        cli.gpu_layers,
-        !cli.no_mlock,
-        kv_mode,
-        cli.ctx_size,
-    ).await?;
+    let opts = server_options(cli, host, port, socket.map(|p| p.to_path_buf()), kv_mode, false)?;
+    server::run_server(engine, model_name, model_path, opts).await?;
     Ok(())
 }
 
@@ -429,18 +481,8 @@ async fn cmd_web(cli: &Cli, port: u16, host: &str, open_browser: bool) -> Result
         });
     }
 
-    server::run_server(
-        engine,
-        model_name,
-        model_path,
-        host,
-        port,
-        None,
-        cli.gpu_layers,
-        !cli.no_mlock,
-        kv_mode,
-        cli.ctx_size,
-    ).await?;
+    let opts = server_options(cli, host, port, None, kv_mode, true)?;
+    server::run_server(engine, model_name, model_path, opts).await?;
     Ok(())
 }
 

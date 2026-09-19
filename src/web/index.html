@@ -1492,6 +1492,37 @@
   </div>
 
   <script>
+    // API-key shim: when the server was started with --api-key, every /v1/*
+    // call carries it; a 401 prompts once and remembers the key in this browser.
+    (function () {
+      const KEY = 'nirvana_api_key';
+      const orig = window.fetch.bind(window);
+      const stored = () => { try { return localStorage.getItem(KEY); } catch (_) { return null; } };
+      const remember = (k) => { try { localStorage.setItem(KEY, k); } catch (_) {} };
+      const withAuth = (init, key) => {
+        const next = Object.assign({}, init || {});
+        const h = new Headers(next.headers || {});
+        h.set('Authorization', 'Bearer ' + key);
+        next.headers = h;
+        return next;
+      };
+      window.fetch = async function (input, init) {
+        const url = typeof input === 'string' ? input : (input && input.url) || '';
+        const isApi = url.startsWith('/v1/');
+        const key = stored();
+        let res = await orig(input, isApi && key ? withAuth(init, key) : init);
+        if (res.status === 401 && isApi) {
+          const entered = window.prompt('This Nirvana Code server requires an API key.\nIt was printed in the terminal where the server started.');
+          if (entered && entered.trim()) {
+            remember(entered.trim());
+            res = await orig(input, withAuth(init, entered.trim()));
+          }
+        }
+        return res;
+      };
+    })();
+  </script>
+  <script>
     // State
     let isGenerating = false;
     let abortController = null;

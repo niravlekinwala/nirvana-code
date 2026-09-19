@@ -271,43 +271,47 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-fn extract_pdf(path: &Path) -> Result<(usize, String)> {
-    let script = r#"
-import Foundation
-import PDFKit
+/// Native helper compiled by build.rs (PDFKit + Vision). Empty when swiftc
+/// was unavailable at build time.
+const EXTRACT_HELPER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/nirvana-extract"));
 
-let path = CommandLine.arguments[1]
-let url = URL(fileURLWithPath: path)
-guard let doc = PDFDocument(url: url) else {
-    fputs("ERR: failed to open PDF document\n", stderr)
-    exit(1)
-}
-let count = doc.pageCount
-print("PAGES:\(count)")
-var fullText = ""
-let maxPages = min(count, 50)
-for i in 0..<maxPages {
-    if let page = doc.page(at: i), let text = page.string {
-        fullText += "\n[Page \(i + 1)]\n"
-        fullText += text
-        if fullText.count > 25000 {
-            fullText += "\n[... Document truncated at 25,000 characters to fit model context ...]\n"
-            break
-        }
+/// Materialise the embedded helper under ~/.nirvana/bin once per binary
+/// build (keyed by content length + version) and return its path.
+#[allow(clippy::const_is_empty)] // empty only when build.rs found no swiftc
+fn helper_path() -> Option<PathBuf> {
+    if EXTRACT_HELPER.is_empty() {
+        return None;
     }
+    static PATH: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let dir = dirs::home_dir()?.join(".nirvana").join("bin");
+        fs::create_dir_all(&dir).ok()?;
+        let name = format!("nirvana-extract-{}-{}", env!("CARGO_PKG_VERSION"), EXTRACT_HELPER.len());
+        let path = dir.join(name);
+        let up_to_date = fs::metadata(&path).map(|m| m.len() as usize == EXTRACT_HELPER.len()).unwrap_or(false);
+        if !up_to_date {
+            let tmp = path.with_extension("tmp");
+            fs::write(&tmp, EXTRACT_HELPER).ok()?;
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).ok()?;
+            }
+            fs::rename(&tmp, &path).ok()?;
+        }
+        Some(path)
+    })
+    .clone()
 }
-print("---CONTENT---")
-print(fullText)
-"#;
 
-    let output = Command::new("swift")
-        .arg("-e")
-        .arg(script)
-        .arg(path.as_os_str())
-        .output();
+fn run_helper(mode: &str, path: &Path) -> Option<std::process::Output> {
+    let helper = helper_path()?;
+    Command::new(helper).arg(mode).arg(path.as_os_str()).output().ok()
+}
 
-    match output {
-        Ok(out) if out.status.success() => {
+fn extract_pdf(path: &Path) -> Result<(usize, String)> {
+
+    match run_helper("pdf", path) {
+        Some(out) if out.status.success() => {
             let text_out = String::from_utf8_lossy(&out.stdout).to_string();
             let mut pages = 1;
             let mut content = String::new();
@@ -383,44 +387,10 @@ fn extract_image(path: &Path) -> Result<(String, String)> {
         }
     }
 
-    // 2. Perform Apple Silicon Neural Vision OCR
-    let script = r#"
-import Foundation
-import Vision
-import AppKit
+    // 2. Apple Vision OCR via the embedded helper
 
-let path = CommandLine.arguments[1]
-let url = URL(fileURLWithPath: path)
-guard let img = NSImage(contentsOf: url),
-      let tiff = img.tiffRepresentation,
-      let bitmap = NSBitmapImageRep(data: tiff),
-      let cgImage = bitmap.cgImage else {
-    exit(1)
-}
-
-let request = VNRecognizeTextRequest { (req, err) in
-    guard let observations = req.results as? [VNRecognizedTextObservation] else { return }
-    for obs in observations {
-        if let top = obs.topCandidates(1).first {
-            print(top.string)
-        }
-    }
-}
-request.recognitionLevel = .accurate
-request.usesLanguageCorrection = true
-
-let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-try? handler.perform([request])
-"#;
-
-    let output = Command::new("swift")
-        .arg("-e")
-        .arg(script)
-        .arg(path.as_os_str())
-        .output();
-
-    let recognized_text = match output {
-        Ok(out) if out.status.success() => {
+    let recognized_text = match run_helper("ocr", path) {
+        Some(out) if out.status.success() => {
             let ocr_out = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if ocr_out.is_empty() {
                 "(No text detected in image by Apple Vision OCR)".to_string()
@@ -518,12 +488,13 @@ mod tests {
 
     #[test]
     fn test_attachment_pdf_extraction() {
-        let pdf_path = Path::new("/Users/nirav/Downloads/es5c01493_si_001.pdf");
+        // Any text PDF works: NIRVANA_TEST_PDF=/path/to/file.pdf cargo test
+        let Some(pdf_path) = std::env::var_os("NIRVANA_TEST_PDF").map(PathBuf::from) else { return };
         if pdf_path.exists() {
-            let att = Attachment::from_file(pdf_path).unwrap();
+            let att = Attachment::from_file(&pdf_path).unwrap();
             assert_eq!(att.file_type, AttachmentType::Pdf);
-            assert!(att.metadata_summary.contains("9 pages"));
-            assert!(att.extracted_text.contains("Regional Air Quality Management"));
+            assert!(att.metadata_summary.contains("page"), "{}", att.metadata_summary);
+            assert!(!att.extracted_text.is_empty());
         }
     }
 }
