@@ -28,8 +28,9 @@ class NirvanaCode < Formula
 
   def install
     if build.head?
-      # Portable baseline so the bottle runs on every M-series chip
-      ENV["RUSTFLAGS"] = "-C target-cpu=apple-m1"
+      # Portable baseline so the build runs on every M-series chip
+      ENV["RUSTFLAGS"] = ""
+      ENV["GGML_CPU_ARM_ARCH"] = "armv8.4-a+dotprod+fp16"
       system "cargo", "install", "--locked", "--root", prefix, "--path", "."
     else
       bin.install "nirvana-code"

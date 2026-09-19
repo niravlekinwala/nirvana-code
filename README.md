@@ -18,13 +18,21 @@ Everything below is measured, not marketed. Numbers are from an M2 Pro (16 GB) w
 |---|---|---|
 | **Persistent prefix cache** | The KV cache lives across turns. Each request rolls back to the longest shared token prefix and evaluates only what changed. | Warm TTFT **37 ms** vs 552 ms cold on an 862-token prompt (93 % lower) |
 | **KV state persistence** (`--persist-kv`) | The prefix KV state is written to disk on exit and restored on the next launch. | First-turn TTFT in a fresh process: **22 ms** vs 87 ms |
-| **Speculative decoding** (`--draft-model`) | A small draft model proposes tokens; the target verifies them in one batched pass. Draft length adapts 1–16. Output is byte-identical to plain decoding. | Pays off when the target is 5–10× the draft (7B+). On a 1.5B target it is *slower* (81 vs 116 tok/s at 66 % acceptance) — the target is already faster than the draft overhead. |
+| **Speculative decoding** (`--draft-model`) | A 0.5B draft proposes tokens while its confidence stays above 0.75; the target verifies them in one batched pass. Output is byte-identical to plain decoding. | **7B Q4_K_M: 38.7 vs 35.7 tok/s (+8 %) at 82 % acceptance.** Modest on Apple Silicon because a draft step costs a fixed Metal round-trip (~¼ of a 7B step); gains grow with the target size. On a 1.5B target it is *slower* (81 vs 116 tok/s) — do not use it there. |
 | **Prompt-lookup decoding** (`--ngram-speculative`) | Self-speculation from n-gram repeats in the context; no second model. | Gains on repetitive edits/refactors; neutral otherwise (116.6 vs 115.8 tok/s on prose). |
 | **Quantized KV cache** (`--kv-type q8_0`/`q4_0`) | 8- or 4-bit attention cache with Flash Attention on. | Halves / quarters KV memory so larger contexts and models fit in 16 GB. |
 | **Memory fit** | llama.cpp's fitter picks the GPU offload split; `mlock` is auto-disabled above 70 % of RAM; when weights exceed the GPU-wired budget the exact `sysctl iogpu.wired_limit_mb` to raise it is printed. | 27B-class models load on 16 GB instead of thrashing. |
 | **Model-native chat templates** | The GGUF's own Jinja template is rendered (Gemma, Llama 3, Mistral, DeepSeek, Qwen …), not a hard-coded ChatML. | Correct output from non-ChatML models. |
 
-Baseline on this machine: **1,560 tok/s prefill, 114 tok/s decode** (1.5B Q4_K_M); 22 tok/s decode on a 9B Q6_K.
+Baselines on this machine (`bench --runs 3`, 862-token prompt):
+
+| Model | Prefill | Decode | Cold TTFT | Warm TTFT |
+|---|---|---|---|---|
+| Qwen2.5-Coder-1.5B Q4_K_M | 1,560 tok/s | 114 tok/s | 552 ms | 37 ms |
+| Qwen2.5-Coder-7B Q4_K_M | 347 tok/s | 35 tok/s | 2,483 ms | 124 ms |
+| Qwen 3.5 9B Q6_K | — | 22 tok/s | — | — |
+
+Numbers from other chips are welcome as PRs — paste the `bench --json` output.
 
 ## Install
 
@@ -49,6 +57,7 @@ For a binary that runs on every M-series chip use `scripts/build-release.sh`, wh
 nirvana-code download qwen-0.5b          # 0.4 GB — draft model for speculative decoding
 nirvana-code download qwen-coder-1.5b    # 1.0 GB
 nirvana-code download qwen-coder-3b      # 2.1 GB
+nirvana-code download qwen-coder-7b      # 4.7 GB — pair with qwen-0.5b for speculative decoding
 nirvana-code download qwen-3.5-9b        # 7.4 GB — best quality that leaves room on 16 GB
 nirvana-code download qwen-3.8-27b       # 13.8 GB — needs the wired-limit sysctl on 16 GB
 ```
@@ -59,7 +68,7 @@ nirvana-code download qwen-3.8-27b       # 13.8 GB — needs the wired-limit sys
 nirvana-code run                                   # TUI (Ctrl+K palette, Ctrl+C stop, Ctrl+R clear)
 nirvana-code prompt "Write a lock-free ring buffer in Rust"
 nirvana-code prompt "…" --preset clean-refactor    # see `nirvana-code prompt --help` for presets
-nirvana-code -m qwen-3.5-9b --draft-model qwen-0.5b run    # speculative decoding (same tokenizer family)
+nirvana-code -m qwen-coder-7b --draft-model qwen-0.5b run  # speculative decoding (same tokenizer family)
 nirvana-code --persist-kv --ctx-size 8192 --kv-type q8_0 web
 nirvana-code bench --runs 5 --json                 # reproducible numbers for issues and PRs
 ```

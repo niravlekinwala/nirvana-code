@@ -591,10 +591,11 @@ async fn cmd_single_shot(cli: &Cli, prompt: &str, preset: &str) -> Result<()> {
                 tokens_per_sec,
                 total_tokens,
                 prefix_cache_hit,
+                kv_type,
                 ..
             } => {
                 println!(
-                    "\n\n[Stats: TTFT: {ttft_ms}ms | {tokens_per_sec:.1} tok/s | {total_tokens} tokens | Prefix Hit: {prefix_cache_hit}]"
+                    "\n\n[Stats: TTFT: {ttft_ms}ms | {tokens_per_sec:.1} tok/s | {total_tokens} tokens | Prefix Hit: {prefix_cache_hit} | {kv_type}]"
                 );
             }
             StreamEvent::Done => break,

@@ -4,7 +4,6 @@ use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
-use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -28,6 +27,25 @@ const MAX_VOCAB_SIZE_DIFF: i32 = 128;
 /// token was accepted, shrinks by one after an early rejection.
 const MIN_DRAFT: usize = 1;
 const MAX_DRAFT: usize = 16;
+
+/// Stop drafting once the draft's top-token probability falls below this.
+/// A low-confidence draft token is usually rejected, and every draft step
+/// costs a Metal round-trip; same threshold as llama.cpp's common/speculative.
+const DRAFT_P_MIN: f32 = 0.75;
+
+/// Greedy pick plus its softmax probability, straight from the logits.
+fn greedy_with_prob(logits: &[f32]) -> (LlamaToken, f32) {
+    let mut best = 0usize;
+    let mut max = f32::NEG_INFINITY;
+    for (i, &l) in logits.iter().enumerate() {
+        if l > max {
+            max = l;
+            best = i;
+        }
+    }
+    let sum: f32 = logits.iter().map(|&l| (l - max).exp()).sum();
+    (LlamaToken(best as i32), 1.0 / sum)
+}
 
 /// Persistent context plus the mirror of what is in its KV cache.
 struct ModelSlot {
@@ -298,7 +316,6 @@ impl SpeculativeEngine {
         // 3. Samplers: the draft is always greedy — its job is to guess what the
         //    target will pick, and the target's own sampler makes the real choice.
         let mut target_sampler = build_sampler(&self.target_model, config);
-        let mut draft_sampler = LlamaSampler::greedy();
         let mut decoder = encoding_rs::UTF_8.new_decoder();
 
         let mut total_generated = 0usize;
@@ -354,12 +371,14 @@ impl SpeculativeEngine {
             )? {
                 break;
             }
+            // Logits live at the last row of whatever batch was decoded last
+            let mut d_logits_idx = d_batch.n_tokens() - 1;
 
-            // b. Draft up to n_draft tokens greedily
+            // b. Draft greedily while the draft is confident, up to n_draft
             let mut cands: Vec<LlamaToken> = Vec::with_capacity(n_draft);
             while cands.len() < n_draft {
-                let d_tok = draft_sampler.sample(d_ctx, -1);
-                if self.draft_model.is_eog_token(d_tok) {
+                let (d_tok, p) = greedy_with_prob(d_ctx.get_logits_ith(d_logits_idx));
+                if self.draft_model.is_eog_token(d_tok) || (!cands.is_empty() && p < DRAFT_P_MIN) {
                     break;
                 }
                 cands.push(d_tok);
@@ -370,6 +389,7 @@ impl SpeculativeEngine {
                 d_batch.add(d_tok, d_cache.tokens.len() as i32, &[0], true)?;
                 d_ctx.decode(&mut d_batch)?;
                 d_cache.tokens.push(d_tok);
+                d_logits_idx = 0;
             }
             drafted += cands.len();
 

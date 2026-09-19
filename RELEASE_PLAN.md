@@ -84,7 +84,7 @@ id, socket `0600`, Swift helper compiled at build time instead of per call.
 ### Phase 3 — Performance — ✅ `23a7e6a` (with two items blocked)
 | # | Item | Result |
 |---|---|---|
-| 1 | Working speculative decoding, adaptive K | Done. Correct on real pairs; speed-up expects 7B+ targets (see README). |
+| 1 | Working speculative decoding, adaptive K | Done. Correct on real pairs. With confidence-gated drafting (p_min 0.75): 7B Q4_K_M +8 % (38.7 vs 35.7 tok/s, 82 % acceptance). Sweep: p_min 0.6 → 36.1, 0.9 → 31.8. |
 | 2 | Prompt-lookup tuning | Done (3-gram/8, fallback 2-gram/4). |
 | 3 | Memory fit on 16 GB | Done: `fit_params`, mlock auto-off >70 % RAM, `iogpu.wired_limit_mb` advisory. |
 | 4 | Context params | `no_perf` set. `defrag_thold` is deprecated upstream; `swa_full=false` would break arbitrary KV rollback — both left at llama.cpp defaults. `rollback` now honours a refused `seq_rm`. |
@@ -112,13 +112,10 @@ numbers and the security model.
    fill in the formula's URL and sha256.
 2. **Cross-chip numbers**: run `nirvana-code bench --runs 5 --json` on M1, M3
    Max, M4 and paste into the README table; revisit the `--ubatch` default.
-3. **Speculative speed-up on a large target**: download Qwen2.5-Coder-7B (same
-   tokenizer as the 0.5B draft) and record the number before promoting the
-   feature.
-4. **Threadpool priority**: upstream accessor in `llama-cpp-2` (Phase 3 §5).
-5. **Prompt templates**: `templates.rs` targets Claude 3.7 / o1 / Antigravity —
+3. **Threadpool priority**: upstream accessor in `llama-cpp-2` (Phase 3 §5).
+4. **Prompt templates**: `templates.rs` targets Claude 3.7 / o1 / Antigravity —
    dated names; refresh or drop.
-6. **Merge** `release-prep` into `main` and tag `v0.3.0`.
+5. **Merge** `release-prep` into `main` and tag `v0.3.0`.
 
 ## 5. Timeline
 
