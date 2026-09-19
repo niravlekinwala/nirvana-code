@@ -1,5 +1,6 @@
 mod app;
 mod chat;
+mod config;
 pub mod attachment;
 mod cli;
 mod clipboard;
@@ -19,7 +20,6 @@ mod ui;
 
 use anyhow::{Context, Result};
 use app::{App, EngineState};
-use clap::Parser;
 use cli::{Cli, Commands};
 use crossterm::{
     event::{
@@ -43,7 +43,7 @@ use tokio::sync::mpsc::unbounded_channel;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = config::parse_cli();
     engine::set_verbose(cli.verbose);
 
     match &cli.command {
@@ -55,8 +55,8 @@ async fn main() -> Result<()> {
             ModelManager::download_target(target).await?;
             return Ok(());
         }
-        Some(Commands::Bench { num_tokens }) => {
-            cmd_benchmark(&cli, *num_tokens).await?;
+        Some(Commands::Bench { num_tokens, runs, json, prompt_tokens }) => {
+            cmd_benchmark(&cli, *num_tokens, *runs, *json, *prompt_tokens).await?;
             return Ok(());
         }
         Some(Commands::Prompt { prompt, preset }) => {
@@ -277,108 +277,158 @@ fn cmd_list_models() -> Result<()> {
     Ok(())
 }
 
-async fn cmd_benchmark(cli: &Cli, num_tokens: usize) -> Result<()> {
+async fn cmd_benchmark(cli: &Cli, num_tokens: usize, runs: usize, json: bool, prompt_tokens: usize) -> Result<()> {
     let model_path = ModelManager::resolve_model_path(cli.model.as_deref())
         .context("No model found for benchmark. Run 'nirvana-code download qwen-1.5b'")?;
-
     let kv_mode = cli.kv_mode();
+    let hw = hardware::SiliconProfile::detect();
+    let runs = runs.max(1);
 
-    println!("\n⚡ Running Silicon Core Benchmark on Apple Silicon...");
-    println!("   Model:       {}", model_path.display());
-    println!("   KV-Cache:    {}", kv_mode.label());
-    println!("   Memory:      mlock pinned in Unified RAM");
-    if cli.ngram_speculative {
-        println!("   Speculation: Prompt Lookup Decoding (N-gram matching) ENABLED");
+    if !json {
+        println!("\n⚡ Nirvana Code benchmark");
+        println!("   Chip:        {} ({}P+{}E, {} GPU cores, {} GB)", hw.chip_name, hw.p_cores, hw.e_cores, hw.gpu_cores, hw.memory_gb);
+        println!("   Model:       {}", model_path.display());
+        println!("   KV-Cache:    {}", kv_mode.label());
+        println!("   Context:     {} tokens · prompt ≈{} tokens · {} output tokens · {} runs", cli.ctx_size, prompt_tokens, num_tokens, runs);
+        println!();
     }
-    println!();
 
     let engine = load_engine(cli, &model_path, kv_mode)?;
 
-    let system_prompt = "You are Nirvana Code, an ultra-fast Apple Silicon coding assistant. Provide clean Rust code.";
-    let test_prompt_1 = vec![
-        chat::ChatMessage::system(system_prompt),
-        chat::ChatMessage::user("Write a fast concurrent queue in Rust using atomic pointers."),
+    // A prompt of roughly `prompt_tokens` tokens so prefill is measurable
+    let filler = "fn compute(x: i32) -> i32 { x * 2 + 1 } ";
+    let mut body = String::new();
+    while body.len() < prompt_tokens * 3 {
+        body.push_str(filler);
+    }
+    let system = "You are Nirvana Code, an Apple Silicon coding assistant. Answer with code.";
+    let cold_prompt = vec![
+        chat::ChatMessage::system(system),
+        chat::ChatMessage::user(format!("Here is some code:\n{body}\nWrite a fast concurrent queue in Rust.")),
     ];
-    let test_prompt_2 = vec![
-        chat::ChatMessage::system(system_prompt),
-        chat::ChatMessage::user("Explain how the concurrent queue prevents data races."),
+    let warm_prompt = vec![
+        chat::ChatMessage::system(system),
+        chat::ChatMessage::user(format!("Here is some code:\n{body}\nExplain how the queue avoids data races.")),
     ];
 
     let config = GenerationConfig {
         max_tokens: num_tokens,
         temperature: 0.0,
-        min_p: cli.min_p,
-        top_p: cli.top_p,
-        top_k: cli.top_k,
         use_ngram_speculative: cli.ngram_speculative,
-        seed: cli.seed,
-        repeat_penalty: cli.repeat_penalty,
-        dry_multiplier: cli.dry_multiplier,
+        seed: Some(1),
         ..GenerationConfig::default()
     };
 
-    // Turn 1: Cold Cache Prefill
-    println!("🚀 [Turn 1] Cold Cache Prefill (Evaluating system + user prompt from scratch)...");
-    let (tx1, mut rx1) = unbounded_channel();
-    let cancel1 = Arc::new(AtomicBool::new(false));
-
-    let eng1 = engine.clone();
-    let cfg1 = config.clone();
-    tokio::task::spawn_blocking(move || {
-        let tx_err = tx1.clone();
-        if let Err(e) = eng1.stream_chat(&test_prompt_1, &cfg1, cancel1, tx1) {
-            let _ = tx_err.send(StreamEvent::Error(e.to_string()));
-        }
-    });
-
-    let mut ttft_cold = 0;
-    let mut tps_cold = 0.0;
-    while let Some(ev) = rx1.recv().await {
-        if let StreamEvent::Stats { ttft_ms, tokens_per_sec, .. } = ev {
-            ttft_cold = ttft_ms;
-            tps_cold = tokens_per_sec;
-        }
+    #[derive(Default, Clone, Copy)]
+    struct Sample {
+        ttft_ms: f64,
+        prefill_tps: f64,
+        decode_tps: f64,
+        prompt_tokens: usize,
+        prefix_reused: usize,
     }
-    println!("   Cold TTFT:    {ttft_cold} ms");
-    println!("   Decode Speed: {tps_cold:.1} tokens/sec\n");
 
-    // Turn 2: Warm Prefix Cache Reuse
-    println!("⚡ [Turn 2] Warm Prefix Cache Reuse (Reusing system prompt KV state)...");
-    let (tx2, mut rx2) = unbounded_channel();
-    let cancel2 = Arc::new(AtomicBool::new(false));
-
-    let eng2 = engine.clone();
-    let cfg2 = config.clone();
-    tokio::task::spawn_blocking(move || {
-        let tx_err = tx2.clone();
-        if let Err(e) = eng2.stream_chat(&test_prompt_2, &cfg2, cancel2, tx2) {
-            let _ = tx_err.send(StreamEvent::Error(e.to_string()));
+    async fn run_once(engine: &InferenceEngine, msgs: &[chat::ChatMessage], cfg: &GenerationConfig) -> Result<Sample> {
+        let (tx, mut rx) = unbounded_channel();
+        let eng = engine.clone();
+        let msgs = msgs.to_vec();
+        let cfg = cfg.clone();
+        tokio::task::spawn_blocking(move || {
+            let tx_err = tx.clone();
+            if let Err(e) = eng.stream_chat(&msgs, &cfg, Arc::new(AtomicBool::new(false)), tx) {
+                let _ = tx_err.send(StreamEvent::Error(e.to_string()));
+            }
+        });
+        let mut out = Sample::default();
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                StreamEvent::Stats { ttft_ms, tokens_per_sec, prompt_tokens, prefix_tokens_reused, .. } => {
+                    out.ttft_ms = ttft_ms as f64;
+                    out.decode_tps = tokens_per_sec;
+                    out.prompt_tokens = prompt_tokens;
+                    out.prefix_reused = prefix_tokens_reused;
+                    let evaluated = prompt_tokens.saturating_sub(prefix_tokens_reused);
+                    out.prefill_tps = if ttft_ms > 0 { evaluated as f64 / (ttft_ms as f64 / 1000.0) } else { 0.0 };
+                }
+                StreamEvent::Error(e) => anyhow::bail!("benchmark generation failed: {e}"),
+                _ => {}
+            }
         }
-    });
-
-    let mut ttft_warm = 0;
-    let mut tps_warm = 0.0;
-    let mut prefix_reused = 0;
-    while let Some(ev) = rx2.recv().await {
-        if let StreamEvent::Stats { ttft_ms, tokens_per_sec, prefix_tokens_reused, .. } = ev {
-            ttft_warm = ttft_ms;
-            tps_warm = tokens_per_sec;
-            prefix_reused = prefix_tokens_reused;
-        }
+        Ok(out)
     }
-    println!("   Warm TTFT:    {ttft_warm} ms (Prefix tokens reused: {prefix_reused})");
-    println!("   Decode Speed: {tps_warm:.1} tokens/sec\n");
 
-    let speedup = if ttft_cold > 0 && ttft_warm < ttft_cold {
-        ((ttft_cold as f64 - ttft_warm as f64) / ttft_cold as f64) * 100.0
+    fn median(v: &mut [f64]) -> f64 {
+        if v.is_empty() {
+            return 0.0;
+        }
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = v.len();
+        if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 }
+    }
+
+    // Warm-up pass: Metal shader compilation and first-touch page faults
+    engine.clear_cache();
+    let _ = run_once(&engine, &cold_prompt, &GenerationConfig { max_tokens: 4, ..config.clone() }).await?;
+
+    let mut cold: Vec<Sample> = Vec::with_capacity(runs);
+    let mut warm: Vec<Sample> = Vec::with_capacity(runs);
+    for i in 0..runs {
+        engine.clear_cache();
+        let c = run_once(&engine, &cold_prompt, &config).await?;
+        let w = run_once(&engine, &warm_prompt, &config).await?;
+        if !json {
+            println!(
+                "   run {:>2}: cold TTFT {:>6.0} ms ({:>6.0} tok/s prefill) · warm TTFT {:>5.0} ms ({} reused) · decode {:>6.1} tok/s",
+                i + 1, c.ttft_ms, c.prefill_tps, w.ttft_ms, w.prefix_reused, c.decode_tps
+            );
+        }
+        cold.push(c);
+        warm.push(w);
+    }
+
+    let m = |f: &dyn Fn(&Sample) -> f64, v: &[Sample]| median(&mut v.iter().map(f).collect::<Vec<_>>());
+    let cold_ttft = m(&|s| s.ttft_ms, &cold);
+    let warm_ttft = m(&|s| s.ttft_ms, &warm);
+    let prefill = m(&|s| s.prefill_tps, &cold);
+    let decode = m(&|s| s.decode_tps, &cold);
+    let decode_warm = m(&|s| s.decode_tps, &warm);
+    let reused = warm.first().map(|s| s.prefix_reused).unwrap_or(0);
+    let n_prompt = cold.first().map(|s| s.prompt_tokens).unwrap_or(0);
+
+    if json {
+        let out = serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "chip": hw.chip_name,
+            "p_cores": hw.p_cores, "e_cores": hw.e_cores, "gpu_cores": hw.gpu_cores, "memory_gb": hw.memory_gb,
+            "model": model_path.file_name().map(|n| n.to_string_lossy().to_string()),
+            "backend": engine.backend_name(),
+            "kv_cache": engine.kv_label(),
+            "ctx": cli.ctx_size,
+            "ubatch": engine::ubatch_size(),
+            "runs": runs,
+            "prompt_tokens": n_prompt,
+            "output_tokens": num_tokens,
+            "median": {
+                "cold_ttft_ms": cold_ttft,
+                "warm_ttft_ms": warm_ttft,
+                "prefill_tok_s": prefill,
+                "decode_tok_s": decode,
+                "decode_tok_s_warm": decode_warm,
+                "prefix_tokens_reused": reused,
+            },
+            "runs_cold_ttft_ms": cold.iter().map(|s| s.ttft_ms).collect::<Vec<_>>(),
+            "runs_decode_tok_s": cold.iter().map(|s| s.decode_tps).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
-        0.0
-    };
-
-    println!("🏆 BENCHMARK RESULTS:");
-    println!("   Prefix Caching TTFT Reduction: {speedup:.1}% latency reduction!");
-    println!("   KV-Cache Quantization:         {} active.", engine.kv_label());
-    println!("   Memory Locking (mlock):        Zero virtual memory page faults.\n");
+        let reduction = if cold_ttft > 0.0 { (cold_ttft - warm_ttft) / cold_ttft * 100.0 } else { 0.0 };
+        println!("\n   median of {runs} runs");
+        println!("   prefill:     {prefill:>7.0} tok/s   (cold TTFT {cold_ttft:.0} ms over {n_prompt} prompt tokens)");
+        println!("   warm TTFT:   {warm_ttft:>7.0} ms      ({reused} prefix tokens reused, {reduction:.0}% lower than cold)");
+        println!("   decode:      {decode:>7.1} tok/s   (warm run {decode_warm:.1})");
+        println!("   backend:     {} · {}", engine.backend_name(), engine.kv_label());
+        println!();
+    }
 
     Ok(())
 }

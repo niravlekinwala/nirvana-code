@@ -196,15 +196,24 @@ pub enum Commands {
         target: String,
     },
 
-    #[command(about = "Run Apple Silicon benchmark (TTFT with/without prefix cache, TPS)")]
+    #[command(about = "Benchmark prefill, cold/warm TTFT and decode speed (median of N runs)")]
     Bench {
         #[arg(
             short = 'n',
             long = "num-tokens",
             default_value = "128",
-            help = "Number of benchmark tokens to generate"
+            help = "Number of output tokens per run"
         )]
         num_tokens: usize,
+
+        #[arg(long = "runs", default_value = "5", help = "Number of measured runs (after one warm-up)")]
+        runs: usize,
+
+        #[arg(long = "prompt-tokens", default_value = "512", help = "Approximate prompt length in tokens")]
+        prompt_tokens: usize,
+
+        #[arg(long = "json", help = "Emit machine-readable JSON instead of a table")]
+        json: bool,
     },
 
     #[command(about = "Single-shot headless generation or prompt optimization")]
