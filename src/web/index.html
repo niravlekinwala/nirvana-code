@@ -906,6 +906,7 @@
 
     // Attachment State & Elements
     let currentAttachment = null;
+    let attachmentProcessingPromise = null;
     const attachmentBar = document.getElementById('attachmentBar');
     const attachmentThumb = document.getElementById('attachmentThumb');
     const attachmentName = document.getElementById('attachmentName');
@@ -927,20 +928,21 @@
 
     function clearAttachment() {
       currentAttachment = null;
+      attachmentProcessingPromise = null;
       attachmentBar.style.display = 'none';
       attachmentThumb.innerHTML = '📎';
       attachmentName.textContent = '';
       attachmentMeta.textContent = '';
     }
 
-    async function processUploadedFile(file) {
+    function processUploadedFile(file) {
       if (!file) return;
 
       currentAttachment = {
         filename: file.name,
         file_type: (file.name.split('.').pop() || 'file').toUpperCase(),
         size_bytes: file.size,
-        metadata_summary: 'Processing on Apple Silicon...',
+        metadata_summary: 'Extracting on Apple Silicon...',
         extracted_text: null,
         data: null,
       };
@@ -959,38 +961,60 @@
         attachmentThumb.innerHTML = `<span style="font-size:16px;">${icon}</span>`;
       }
 
-      // Read as base64 data URL
-      const reader = new FileReader();
-      reader.onload = async function() {
-        const base64Data = reader.result;
-        currentAttachment.data = base64Data;
-
-        try {
-          const res = await fetch('/v1/attachments/process', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              filename: file.name,
-              data: base64Data
-            })
-          });
-          const result = await res.json();
-          if (res.ok) {
-            currentAttachment.extracted_text = result.extracted_text;
-            currentAttachment.metadata_summary = result.metadata_summary;
-            currentAttachment.file_type = result.file_type;
-            attachmentMeta.textContent = `✔ ${result.file_type}: ${result.metadata_summary}`;
-            showToast(`📎 Attached: ${file.name}`);
-          } else {
-            attachmentMeta.textContent = `⚠️ Fallback: ${result.error || 'Server error'}`;
-            showToast(`⚠️ ${result.error || 'Processing issue'}`);
+      attachmentProcessingPromise = new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = async function() {
+          const base64Data = reader.result;
+          if (currentAttachment) {
+            currentAttachment.data = base64Data;
           }
-        } catch (err) {
-          attachmentMeta.textContent = `Attached (Raw file data)`;
-          showToast(`📎 File attached`);
-        }
-      };
-      reader.readAsDataURL(file);
+
+          try {
+            const res = await fetch('/v1/attachments/process', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                filename: file.name,
+                data: base64Data
+              })
+            });
+            if (res.ok) {
+              const result = await res.json();
+              if (currentAttachment) {
+                currentAttachment.extracted_text = result.extracted_text;
+                currentAttachment.metadata_summary = result.metadata_summary;
+                currentAttachment.file_type = result.file_type;
+              }
+              attachmentMeta.textContent = `✔ ${result.file_type}: ${result.metadata_summary}`;
+              showToast(`📎 Attached: ${file.name} (${result.metadata_summary})`);
+              resolve(result);
+            } else {
+              let errMsg = `HTTP ${res.status}`;
+              try {
+                const errJson = await res.json();
+                errMsg = errJson.error || errMsg;
+              } catch {
+                try {
+                  const errTxt = await res.text();
+                  if (errTxt) errMsg = errTxt;
+                } catch {}
+              }
+              attachmentMeta.textContent = `⚠️ Extraction fallback: ${errMsg}`;
+              showToast(`⚠️ ${errMsg}`);
+              resolve(null);
+            }
+          } catch (err) {
+            attachmentMeta.textContent = `Attached (${err.message})`;
+            showToast(`📎 File attached`);
+            resolve(null);
+          }
+        };
+        reader.onerror = function() {
+          showToast(`❌ Failed to read file`);
+          resolve(null);
+        };
+        reader.readAsDataURL(file);
+      });
     }
 
     // Clipboard screenshot paste
@@ -1510,6 +1534,13 @@
         }
       }
 
+      // Await pending attachment extraction if still in flight
+      if (attachmentProcessingPromise) {
+        if (attachmentMeta) attachmentMeta.textContent = '⏳ Finalizing extraction before sending...';
+        await attachmentProcessingPromise;
+        attachmentProcessingPromise = null;
+      }
+
       // Capture and consume current attachment
       const attachedToSend = currentAttachment;
       clearAttachment();
@@ -1554,7 +1585,7 @@
             max_tokens: 2048,
             attachment: attachedToSend ? {
               filename: attachedToSend.filename,
-              data: attachedToSend.data,
+              data: attachedToSend.extracted_text ? null : attachedToSend.data,
               extracted_text: attachedToSend.extracted_text,
               metadata_summary: attachedToSend.metadata_summary,
               file_type: attachedToSend.file_type,

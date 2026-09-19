@@ -1,6 +1,6 @@
 use anyhow::Result;
 use axum::{
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     response::{
         sse::{Event, KeepAlive, Sse},
         Html, IntoResponse, Response,
@@ -199,6 +199,7 @@ pub fn create_router(state: ServerState) -> Router {
         .route("/v1/models/load", post(handle_load_model))
         .route("/v1/attachments/process", post(handle_process_attachment))
         .route("/v1/chat/completions", post(handle_chat_completions))
+        .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -221,10 +222,12 @@ async fn handle_process_attachment(
     let fname_clone = filename.clone();
     let data_clone = data.clone();
     let process_res = tokio::task::spawn_blocking(move || {
-        if data_clone.starts_with("data:") || (data_clone.len() > 100 && !data_clone.contains('\n') && !data_clone.starts_with('/')) {
+        if data_clone.starts_with("data:") || (!data_clone.starts_with('/') && !data_clone.starts_with('~') && !data_clone.starts_with('.')) {
             Attachment::from_base64(&fname_clone, &data_clone)
+                .or_else(|_| Attachment::from_file(&data_clone))
         } else {
-            Attachment::from_file(&data_clone).or_else(|_| Attachment::from_base64(&fname_clone, &data_clone))
+            Attachment::from_file(&data_clone)
+                .or_else(|_| Attachment::from_base64(&fname_clone, &data_clone))
         }
     })
     .await;
@@ -556,10 +559,12 @@ async fn handle_chat_completions(
                 let filename = att.filename.clone();
                 let data = data.clone();
                 let parse_res = tokio::task::spawn_blocking(move || {
-                    if data.starts_with("data:") || (data.len() > 100 && !data.contains('\n') && !data.starts_with('/')) {
+                    if data.starts_with("data:") || (!data.starts_with('/') && !data.starts_with('~') && !data.starts_with('.')) {
                         Attachment::from_base64(&filename, &data)
+                            .or_else(|_| Attachment::from_file(&data))
                     } else {
-                        Attachment::from_file(&data).or_else(|_| Attachment::from_base64(&filename, &data))
+                        Attachment::from_file(&data)
+                            .or_else(|_| Attachment::from_base64(&filename, &data))
                     }
                 })
                 .await;
