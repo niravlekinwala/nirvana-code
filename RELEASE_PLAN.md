@@ -54,96 +54,73 @@ Smaller items found alongside:
 
 ---
 
-## 4. The plan
+## 4. The plan — status as of 2026-09-19
 
-### Phase 0 — Hygiene (≈1 day) — ✅ done (`50090e1`)
+All five phases have been executed on the `release-prep` branch. Each phase is
+one commit; `git log --oneline` on the branch is the audit trail. What is
+**not** done is listed explicitly at the end of this section.
 
-- Commit the ~2k lines of uncommitted work on a branch. Add `.cargo/config.toml` to the repo deliberately (see Phase 3, item 8, on `target-cpu=native`).
-- `cargo clippy --fix`; `src/cli.rs:8` version → `env!("CARGO_PKG_VERSION")`.
-- Add LICENSE, CHANGELOG, CONTRIBUTING.
-- GitHub Actions on a `macos-14` (arm64) runner: build, `clippy -D warnings`, test, and a HEAD-check of every `MODEL_CATALOG` URL.
+### Phase 0 — Hygiene — ✅ `50090e1`
+LICENSE (MIT), CHANGELOG, CONTRIBUTING, CI (clippy `-D warnings`, tests,
+portable release build, catalog URL check), version from `Cargo.toml`, zero
+clippy warnings, `.cargo/config.toml` tracked with a portability note.
 
-### Phase 1 — Correctness (≈3–5 days) — 🟡 in progress
+### Phase 1 — Correctness — ✅ `5f0974f`, `5de0411`
+All nine bugs fixed. Highlights: speculative decoding rewritten on the
+pending-token model and proven byte-identical to plain greedy with a real
+0.5B→1.5B draft pair; shared `PrefixCache` (fixed three further latent bugs
+found on the way); chat templates rendered from GGUF metadata via minijinja;
+hardware probe via `sysctlbyname` + IOKit; honest stats; `--verbose`;
+engine errors surfaced instead of swallowed. Model-gated engine tests cover
+regenerate, multi-turn prefix reuse, prompt-lookup and speculative equality,
+and template detection (verified on Qwen and Gemma 4).
 
-Done: bugs 1, 2, 3, 4, 5, 6, 9 (speculative rewrite, shared `PrefixCache`,
-seed, field order, honest stats), plus the engine tests. Remaining: 7 (chat
-templates), 8 (hardware probe rewrite — detection is now memoised but still
-string-matched), prompt truncation on turn boundaries, `--verbose` logging.
+### Phase 2 — Security — ✅ `f234536`
+Every item in §3 closed and verified live with curl: workspace confinement
+(escape and `..` traversal → 403), CORS off by default, `--api-key` (401
+without), `Host` guard (403), installed-only model loads, per-request stop by
+id, socket `0600`, Swift helper compiled at build time instead of per call.
 
-Measured on M2 Pro / Qwen2.5-Coder-1.5B / 0.5B draft, temp 0: plain 116 tok/s,
-speculative K=4 81 tok/s at 66 % acceptance. A 1.5B target is too fast for a
-draft to pay off; the win is expected on 7B–27B targets (Phase 3 §1).
-
-Fix bugs 1–9 above. Concretely:
-
-- **Rewrite `speculative.rs` verification**: sample the target from the *previous* step's logits and compare with `cand[0]`; then logits index `i` vs `cand[i+1]`. On rejection, `seq_rm` from `pos + accepted` on both contexts and feed the target token to the draft. Make `SpeculativeEngine` own persistent target/draft contexts with the same prefix-cache logic as `ModelEngine`.
-- **Factor a shared `PrefixCache` struct** (token list + longest-common-prefix + rollback). The logic is currently duplicated across `engine.rs`, `speculative.rs`, and the context-shift path.
-- **Full-prefix-hit**: if `common_prefix_len == n_prompt`, decrement by one and re-decode the last token.
-- **Prompt-lookup**: emit and cache `next_token` in the all-verified branch; fix the EOG check.
-- **Chat templates**: build prompts via the GGUF's template; read `add_bos` from the vocab.
-- **Seed**: `--seed` flag, random by default; plumb through `GenerationConfig`.
-- **Hardware**: replace `hardware.rs` with `libc::sysctlbyname` reads of `hw.perflevel0.physicalcpu` (P-cores), `hw.perflevel1.physicalcpu` (E-cores), `hw.memsize`, and Metal's `recommendedMaxWorkingSetSize` via `objc2-metal`. Cache the result in a `OnceLock`.
-- **Field order** in `ModelEngine`: `context` before `model`.
-- **Engine tests** using the 0.5B Qwen (gated behind `NIRVANA_TEST_MODEL`): prefix hit / miss / regenerate; ngram all-verified path; speculative output equals greedy non-speculative output at `temperature = 0`.
-
-### Phase 2 — Security & server (≈2–3 days)
-
-- `--workspace <dir>` at startup; project endpoints are confined to it. Canonicalize then `starts_with` to reject symlink escapes.
-- CORS: default to same-origin only; `--cors-origin <origin>` to opt in.
-- `--api-key` bearer token; auto-generate and print one when bound to a non-loopback host. Validate the `Host` header against DNS rebinding.
-- Restrict `/v1/models/load` and auto-load to the model directories `ModelManager` already knows.
-- Per-request cancel tokens keyed by request id; `chmod 0600` on the Unix socket.
-- Replace `swift -e` with in-process `objc2-pdf-kit` / `objc2-vision` (same Apple frameworks, no compiler, ~100× faster), or ship a prebuilt helper binary.
-
-### Phase 3 — Silicon-level performance
-
-Ordered by expected payoff. The honest framing: llama.cpp's Metal kernels are already the fast path — the leverage is in *how the engine drives them*, not in writing shaders.
-
-| # | Change | Expected effect |
+### Phase 3 — Performance — ✅ `23a7e6a` (with two items blocked)
+| # | Item | Result |
 |---|---|---|
-| 1 | **Working speculative decoding** (after the Phase 1 fix). Adaptive `n_draft`: grow on accept, shrink on reject, cap 16. | 1.5–2.5× decode on 7B–27B targets with the 0.5B draft; higher on code. |
-| 2 | **Prompt-lookup tuning**: ngram 3 with fallback to 2, `draft_len` 8–12, hashmap index instead of the O(n) backward scan in `engine.rs`. | 1.3–2× on edit/refactor tasks at long context. |
-| 3 | **Memory fit on 16 GB**: use `LlamaModelParams::fit_params` (present in the crate) to auto-size `n_ctx`/offload; auto-disable `mlock` when model > ~70 % of RAM; detect and *advise* `sudo sysctl iogpu.wired_limit_mb=…` since macOS caps GPU-wired memory at ~75 % (≈67 % on ≤36 GB machines). | The difference between "27B runs" and "27B swaps". |
-| 4 | **Context params not yet set**: `.with_no_perf(true)`, `.with_swa_full(false)` for SWA models, `.with_op_offload(true)`, `.with_defrag_thold(0.1)` so long sessions don't degrade after many `seq_rm`s. | Small steady-state wins; prevents slow decay. |
-| 5 | **Threads**: the QoS call at `engine.rs:286` only affects the calling thread; ggml's workers are separate. Use `llama_attach_threadpool` with a P-core cpumask and `GGML_SCHED_PRIO_HIGH`. | 1–3 %; removes E-core jitter in TTFT. |
-| 6 | **KV state persistence**: `state_seq_save_file` for the system-prompt prefix so a cold start after relaunch is a warm hit. | Makes the 388 → 42 ms number the *default* first-turn experience. |
-| 7 | **Batch sizing per chip**: benchmark `n_ubatch` 512 vs 1024 on M2 Pro / M3 Max / M4; key a profile table on GPU-core count. | Prefill throughput on larger GPUs. |
-| 8 | **Build flags**: `-C target-cpu=native` in `.cargo/config.toml` makes a release binary built on M4 (SME) crash on M1. Distribute with `target-cpu=apple-m1` and let ggml runtime-dispatch; keep `native` for `cargo install`. Verify `GGML_METAL_EMBED_LIBRARY` so the binary carries its metallib. | Portable binaries. |
-| 9 | **Track upstream**: bump `llama-cpp-2` on a schedule; Metal FA and MoE kernel improvements (relevant to the Ornith / LFM catalog entries) arrive that way. | Free wins. |
-| 10 | **Sampler chain**: reorder to llama.cpp's default (top-k → top-p → min-p → temp); add optional `penalties` / `dry` (both in the crate) instead of the MLX-only `repetition_penalty`. | Output quality / parity across backends. |
+| 1 | Working speculative decoding, adaptive K | Done. Correct on real pairs; speed-up expects 7B+ targets (see README). |
+| 2 | Prompt-lookup tuning | Done (3-gram/8, fallback 2-gram/4). |
+| 3 | Memory fit on 16 GB | Done: `fit_params`, mlock auto-off >70 % RAM, `iogpu.wired_limit_mb` advisory. |
+| 4 | Context params | `no_perf` set. `defrag_thold` is deprecated upstream; `swa_full=false` would break arbitrary KV rollback — both left at llama.cpp defaults. `rollback` now honours a refused `seq_rm`. |
+| 5 | Prioritised ggml threadpool | **Blocked**: needs the raw `llama_context` pointer, which `llama-cpp-2` keeps `pub(crate)`. Open an upstream PR for an accessor; expected gain was 1–3 %. |
+| 6 | KV state persistence | Done: `--persist-kv`, 87 → 22 ms first-turn TTFT in a fresh process. |
+| 7 | Batch sizing per chip | `--ubatch` added. Measured on M2 Pro: 512 ≈ 1024 (within noise), 256 slower. Default stays 512; needs M3 Max / M4 numbers from other machines. |
+| 8 | Build flags | CI and `scripts/build-release.sh` use `target-cpu=apple-m1`. |
+| 9 | Track upstream | dependabot (cargo + actions, weekly). |
+| 10 | Sampler chain | Reordered to llama.cpp default; penalties and DRY added, off by default. |
 
-### Phase 4 — MLX decision
+### Phase 4 — MLX — ✅ option (a)
+Labelled experimental in the engine, UI strings, and README. `mlx-rs`
+evaluation remains a post-release task.
 
-Today the MLX backend is a Python subprocess with a 25 s startup and no in-process control. Options:
+### Phase 5 — Release readiness — ✅ `d10f098`, `7b938ef`, this commit
+Reproducible `bench --runs --json`; all 13 catalog URLs verified; downloads
+resume and verify SHA-256 against Hugging Face's `X-Linked-ETag`; config file;
+web UI audited (one real XSS fixed) and split into three files; Homebrew
+formula template; release build script; README rewritten around measured
+numbers and the security model.
 
-- **(a)** Mark it experimental and label it honestly in README and UI — *do this now*.
-- **(b)** Move to `mlx-rs` for in-process MLX — evaluate after Phase 3.
-- **(c)** Drop it for 1.0.
-
-Don't let it block release.
-
-### Phase 5 — Release readiness (≈1 week)
-
-- **Reproducible benchmark**: `nirvana-code bench --json --runs 5`; report median prefill tok/s, decode tok/s, and TTFT cold/warm separately. Publish a table for M1 / M2 Pro / M3 Max / M4 so README claims are verifiable.
-- **Catalog**: verify every `MODEL_CATALOG` URL exists (several entries — "Qwen 3.8 27B", "Ornith 1.5", the "AtomicChat" org — could not be confirmed during review). Add SHA256 checksums and resume support to `download_file`.
-- **Config file**: `~/.config/nirvana-code/config.toml`; `--verbose` routing llama.cpp logs through `tracing` instead of `void_logs()`.
-- **Web UI**: split `src/web/index.html` (3010 lines) into files; audit the 21 `innerHTML` sites — `escapeHtml` exists, confirm every model-output path goes through it.
-- **Distribution**: Homebrew tap + `cargo install`; codesign and notarize the binary.
-- **README**: reword architecture claims to match what the code does; document the security model of `serve`.
-
----
+### Still open (needs the maintainer, not code)
+1. **Publish**: create the GitHub repo/tap, replace `<you>` in `README.md` and
+   `packaging/nirvana-code.rb`, run `scripts/build-release.sh --sign`, notarize,
+   fill in the formula's URL and sha256.
+2. **Cross-chip numbers**: run `nirvana-code bench --runs 5 --json` on M1, M3
+   Max, M4 and paste into the README table; revisit the `--ubatch` default.
+3. **Speculative speed-up on a large target**: download Qwen2.5-Coder-7B (same
+   tokenizer as the 0.5B draft) and record the number before promoting the
+   feature.
+4. **Threadpool priority**: upstream accessor in `llama-cpp-2` (Phase 3 §5).
+5. **Prompt templates**: `templates.rs` targets Claude 3.7 / o1 / Antigravity —
+   dated names; refresh or drop.
+6. **Merge** `release-prep` into `main` and tag `v0.3.0`.
 
 ## 5. Timeline
 
-| Phase | Effort | Gate |
-|---|---|---|
-| 0 Hygiene | 1 day | — |
-| 1 Correctness | 3–5 days | **Required for release** |
-| 2 Security | 2–3 days | **Required for release** |
-| 3 Performance | 1–2 weeks | Items 1, 3, 8 before release; rest can follow |
-| 4 MLX | 0.5 day (option a) | — |
-| 5 Release readiness | 1 week | Required for release |
-
-Rough total: 3–4 weeks of focused work. Phases 1–2 are the non-negotiable gate.
-
-Recommended starting point: the speculative-decoding rewrite and the prefix-cache fixes (Phase 1) — highest value, and they unblock Phase 3 item 1.
+Planned 3–4 weeks; executed in one session on 2026-09-19 across seven commits.
+The remaining items above are publishing and measurement tasks, not code.

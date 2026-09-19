@@ -24,8 +24,13 @@ Engine-level tests that need a real model are gated behind an environment variab
 so the default `cargo test` stays fast and offline:
 
 ```sh
-NIRVANA_TEST_MODEL=~/.nirvana/models/qwen2.5-0.5b-instruct-q4_k_m.gguf cargo test -- --ignored
+NIRVANA_TEST_MODEL=~/.nirvana/models/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf \
+NIRVANA_TEST_DRAFT=~/.nirvana/models/qwen2.5-0.5b-instruct-q4_k_m.gguf \
+cargo test --release -- --ignored
 ```
+
+`NIRVANA_TEST_DRAFT` is optional (the target drafts for itself when unset).
+`NIRVANA_TEST_PDF=/path/to/any.pdf` enables the PDF extraction test.
 
 ## Commit messages
 
