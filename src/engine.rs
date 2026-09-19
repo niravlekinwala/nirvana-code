@@ -73,6 +73,9 @@ pub struct GenerationConfig {
     pub top_p: f32,
     pub top_k: i32,
     pub use_ngram_speculative: bool,
+    /// Sampler RNG seed. `None` draws a fresh seed per generation so regenerating
+    /// the same prompt gives a different answer.
+    pub seed: Option<u32>,
 }
 
 impl Default for GenerationConfig {
@@ -84,8 +87,150 @@ impl Default for GenerationConfig {
             top_p: 0.9,
             top_k: 40,
             use_ngram_speculative: false,
+            seed: None,
         }
     }
+}
+
+impl GenerationConfig {
+    fn resolve_seed(&self) -> u32 {
+        self.seed.unwrap_or_else(|| {
+            use std::hash::{BuildHasher, Hasher};
+            std::collections::hash_map::RandomState::new().build_hasher().finish() as u32
+        })
+    }
+}
+
+/// Build the sampler chain for a generation. Greedy below a tiny temperature,
+/// otherwise llama.cpp's default order (top-k → top-p → min-p → temperature).
+pub(crate) fn build_sampler(config: &GenerationConfig) -> LlamaSampler {
+    if config.temperature <= 0.05 {
+        LlamaSampler::greedy()
+    } else {
+        LlamaSampler::chain_simple([
+            LlamaSampler::top_k(config.top_k),
+            LlamaSampler::top_p(config.top_p, 1),
+            LlamaSampler::min_p(config.min_p, 1),
+            LlamaSampler::temp(config.temperature),
+            LlamaSampler::dist(config.resolve_seed()),
+        ])
+    }
+}
+
+/// Pin the calling thread to User-Interactive QoS so macOS schedules the
+/// decode loop (and its Metal command encoding) on performance cores.
+pub(crate) fn boost_thread_qos() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        unsafe extern "C" {
+            fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+        }
+        let _ = pthread_set_qos_class_self_np(0x21, 0);
+    }
+}
+
+/// Mirror of the tokens resident in sequence 0 of a context's KV cache, in
+/// position order. Invariant: `tokens[i]` is exactly what was decoded at
+/// position `i`; a sampled-but-not-yet-decoded token is never stored here.
+/// Shared by the GGUF and speculative engines so prefix reuse behaves identically.
+#[derive(Default)]
+pub(crate) struct PrefixCache {
+    pub tokens: Vec<LlamaToken>,
+}
+
+impl PrefixCache {
+    /// Roll the KV cache back to the longest prefix shared with `prompt` and
+    /// return how many tokens were reused. Always strictly less than
+    /// `prompt.len()`: at least one prompt token is re-evaluated so the logits
+    /// used for the first sample are fresh (a full hit would otherwise sample
+    /// from whatever the previous generation left behind).
+    pub(crate) fn sync(&mut self, ctx: &mut LlamaContext, prompt: &[LlamaToken]) -> usize {
+        let common = reusable_prefix_len(&self.tokens, prompt);
+        self.rollback(ctx, common);
+        common
+    }
+
+    /// Drop everything at position >= `keep` from the KV cache and the mirror.
+    /// The KV is always trimmed, even when the mirror is already short: after
+    /// speculative verification the KV holds rejected draft tokens the mirror
+    /// never recorded.
+    pub(crate) fn rollback(&mut self, ctx: &mut LlamaContext, keep: usize) {
+        if keep == 0 {
+            ctx.clear_kv_cache();
+        } else {
+            let _ = ctx.kv_cache_seq_rm(0, Some(keep as u32), None);
+        }
+        self.tokens.truncate(keep);
+    }
+
+    /// Decode `tokens` starting at the current end of the cache, in chunks no
+    /// larger than the batch, requesting logits only for the final token.
+    /// Returns `false` if cancelled part-way (the cache stays consistent).
+    pub(crate) fn prefill(
+        &mut self,
+        ctx: &mut LlamaContext,
+        batch: &mut LlamaBatch,
+        tokens: &[LlamaToken],
+        batch_size: usize,
+        cancel: &AtomicBool,
+    ) -> Result<bool> {
+        let n_total = tokens.len();
+        let mut done = 0;
+        for chunk in tokens.chunks(batch_size) {
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(false);
+            }
+            batch.clear();
+            let base = self.tokens.len();
+            for (i, &token) in chunk.iter().enumerate() {
+                let is_last = done + i + 1 == n_total;
+                batch.add(token, (base + i) as i32, &[0], is_last)?;
+            }
+            ctx.decode(batch)?;
+            self.tokens.extend_from_slice(chunk);
+            done += chunk.len();
+        }
+        Ok(true)
+    }
+}
+
+/// Length of the prefix of `prompt` already resident in `cached`, capped at
+/// `prompt.len() - 1` so the final prompt token is always re-evaluated.
+pub(crate) fn reusable_prefix_len(cached: &[LlamaToken], prompt: &[LlamaToken]) -> usize {
+    let limit = prompt.len().saturating_sub(1);
+    cached
+        .iter()
+        .zip(prompt)
+        .take(limit)
+        .take_while(|(a, b)| a == b)
+        .count()
+}
+
+/// Prompt-lookup drafting: find the most recent earlier occurrence of the
+/// last `n` tokens of `history ++ [pending]` and propose the up-to-`k` tokens
+/// that followed it.
+pub(crate) fn ngram_draft(
+    history: &[LlamaToken],
+    pending: LlamaToken,
+    n: usize,
+    k: usize,
+) -> Option<Vec<LlamaToken>> {
+    let len = history.len() + 1;
+    if len < n + 1 {
+        return None;
+    }
+    let at = |i: usize| if i < history.len() { history[i] } else { pending };
+    let query_start = len - n;
+    for i in (0..query_start).rev() {
+        if (0..n).all(|j| at(i + j) == at(query_start + j)) {
+            let start = i + n;
+            let end = (start + k).min(len);
+            if end > start {
+                return Some((start..end).map(at).collect());
+            }
+        }
+    }
+    None
 }
 
 static BACKEND: OnceLock<Arc<SharedBackend>> = OnceLock::new();
@@ -115,11 +260,13 @@ impl SharedBackend {
 }
 
 pub struct ModelEngine {
+    // Persistent context for prefix caching across generations. Declared
+    // before `model`: Rust drops fields in declaration order and the context
+    // borrows the model (see the transmute in `stream_generate_with_config`).
+    context: Mutex<Option<LlamaContext<'static>>>,
+    cached_tokens: Mutex<PrefixCache>,
     backend: Arc<SharedBackend>,
     pub model: Arc<LlamaModel>,
-    // Persistent context for Prefix Caching across generations
-    context: Mutex<Option<LlamaContext<'static>>>,
-    cached_tokens: Mutex<Vec<LlamaToken>>,
     pub kv_mode: KvQuantMode,
     pub use_mlock: bool,
     pub n_gpu_layers: u32,
@@ -177,7 +324,7 @@ impl ModelEngine {
             backend,
             model,
             context: Mutex::new(None),
-            cached_tokens: Mutex::new(Vec::new()),
+            cached_tokens: Mutex::new(PrefixCache::default()),
             kv_mode: resolved_kv,
             use_mlock,
             n_gpu_layers,
@@ -197,8 +344,7 @@ impl ModelEngine {
     pub fn reconfigure_context(&self, new_n_ctx: u32) -> Result<()> {
         let mut ctx_guard = self.context.lock().unwrap();
         *ctx_guard = None;
-        let mut cached_guard = self.cached_tokens.lock().unwrap();
-        cached_guard.clear();
+        self.cached_tokens.lock().unwrap().tokens.clear();
         self.n_ctx.store(new_n_ctx, Ordering::Relaxed);
         Ok(())
     }
@@ -210,8 +356,8 @@ impl ModelEngine {
                 ctx.clear_kv_cache();
             }
         }
-        if let Ok(mut tokens_guard) = self.cached_tokens.lock() {
-            tokens_guard.clear();
+        if let Ok(mut cache) = self.cached_tokens.lock() {
+            cache.tokens.clear();
         }
     }
 
@@ -232,6 +378,7 @@ impl ModelEngine {
             top_p: 0.9,
             top_k: 40,
             use_ngram_speculative: false,
+            seed: None,
         };
         self.stream_generate_with_config(prompt, &config, cancel_token, tx)
     }
@@ -277,14 +424,7 @@ impl ModelEngine {
             return Ok(());
         }
 
-        // Elevate thread QoS on macOS to User Interactive to ensure thread stays pinned on high-frequency Performance Cores
-        #[cfg(target_os = "macos")]
-        unsafe {
-            unsafe extern "C" {
-                fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
-            }
-            let _ = pthread_set_qos_class_self_np(0x21, 0);
-        }
+        boost_thread_qos();
 
         let n_ctx_val = self.n_ctx.load(Ordering::Relaxed);
         let n_batch = 2048.min(n_ctx_val);
@@ -312,78 +452,26 @@ impl ModelEngine {
 
         let ctx = ctx_guard.as_mut().unwrap();
 
-        // 3. Prefix Caching State Verification
-        let mut cached_guard = self.cached_tokens.lock().unwrap();
-        let mut common_prefix_len = 0;
+        // 3. Prefix cache: roll back to the shared prefix, then evaluate the rest
+        let mut cache = self.cached_tokens.lock().unwrap();
+        let prefix_tokens_reused = cache.sync(ctx, &prompt_tokens);
+        let prefix_cache_hit = prefix_tokens_reused > 0;
 
-        // Find longest common prefix between cached tokens and prompt tokens
-        while common_prefix_len < cached_guard.len()
-            && common_prefix_len < n_prompt
-            && cached_guard[common_prefix_len] == prompt_tokens[common_prefix_len]
-        {
-            common_prefix_len += 1;
-        }
-
-        let prefix_cache_hit = common_prefix_len > 0;
-        let prefix_tokens_reused = common_prefix_len;
-
-        // Ingest strategy:
-        // If common prefix exists: rollback KV cache after common_prefix_len
-        // If no common prefix: clear KV cache and start fresh
-        if prefix_cache_hit {
-            let _ = ctx.kv_cache_seq_rm(0, Some(common_prefix_len as u32), None);
-            cached_guard.truncate(common_prefix_len);
-        } else {
-            ctx.clear_kv_cache();
-            cached_guard.clear();
-        }
-
-        // Tokens that need evaluation
-        let tokens_to_eval = &prompt_tokens[common_prefix_len..];
-        let mut n_curr = common_prefix_len;
-
-        // Ingest remaining prompt tokens in chunks strictly <= n_batch
         let batch_size = (n_batch as usize).min(512);
         let mut batch = LlamaBatch::new(batch_size, 1);
-        for chunk in tokens_to_eval.chunks(batch_size) {
-            if cancel_token.load(Ordering::Relaxed) {
-                let _ = tx.send(StreamEvent::Done);
-                return Ok(());
-            }
-
-            batch.clear();
-            let chunk_len = chunk.len();
-            for (i, &token) in chunk.iter().enumerate() {
-                let is_last = (n_curr + i + 1) == n_prompt;
-                batch.add(token, (n_curr + i) as i32, &[0], is_last)?;
-            }
-            n_curr += chunk_len;
-            ctx.decode(&mut batch)?;
+        if !cache.prefill(ctx, &mut batch, &prompt_tokens[prefix_tokens_reused..], batch_size, &cancel_token)? {
+            let _ = tx.send(StreamEvent::Done);
+            return Ok(());
         }
 
-        // Update cached tokens to reflect full prompt in KV cache
-        cached_guard.extend_from_slice(tokens_to_eval);
-
-        // 4. Setup Sampler with Min-P filtering
-        let mut sampler = if config.temperature <= 0.05 {
-            LlamaSampler::greedy()
-        } else {
-            LlamaSampler::chain_simple([
-                LlamaSampler::min_p(config.min_p, 1),
-                LlamaSampler::top_k(config.top_k),
-                LlamaSampler::top_p(config.top_p, 1),
-                LlamaSampler::temp(config.temperature),
-                LlamaSampler::dist(42),
-            ])
-        };
-
+        // 4. Sampler
+        let mut sampler = build_sampler(config);
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut total_generated = 0;
 
-        // Sample initial token from the prompt evaluation
+        // `current_token` is the pending token: sampled and emitted, but not yet
+        // decoded into the KV. `cache.tokens` therefore never includes it.
         let mut current_token = sampler.sample(ctx, batch.n_tokens() - 1);
-        sampler.accept(current_token);
-
         if self.model.is_eog_token(current_token) {
             let _ = tx.send(StreamEvent::Done);
             return Ok(());
@@ -391,117 +479,99 @@ impl ModelEngine {
 
         let first_token_time = Some(Instant::now());
         total_generated += 1;
-
         if let Ok(piece) = self.model.token_to_piece(current_token, &mut decoder, false, None) {
             if !piece.is_empty() {
                 let _ = tx.send(StreamEvent::Token(piece));
             }
         }
-        cached_guard.push(current_token);
 
-        // 5. Autoregressive / Speculative Generation Loop
+        // 5. Autoregressive / prompt-lookup generation loop
+        const NGRAM_LEN: usize = 3;
+        const NGRAM_DRAFT: usize = 3;
         while total_generated < config.max_tokens {
             if cancel_token.load(Ordering::Relaxed) {
                 break;
             }
 
-            // Context Shifting: Prevent overflow when approaching context capacity
-            if (n_curr + 32) >= n_ctx_val as usize {
-                let keep = (n_ctx_val / 8).max(32);
-                let drop = (n_ctx_val / 4).max(64);
-                if (n_curr as u32) > keep + drop {
-                    let _ = ctx.kv_cache_seq_rm(0, Some(keep), Some(keep + drop));
-                    let _ = ctx.kv_cache_seq_add(0, Some(keep + drop), Some(n_curr as u32), -(drop as i32));
-                    n_curr -= drop as usize;
-                    if cached_guard.len() > (keep + drop) as usize {
-                        cached_guard.drain((keep as usize)..(keep + drop) as usize);
-                    }
+            let n_past = cache.tokens.len();
+
+            // Context shifting: drop a block after the head and slide the rest down
+            if (n_past + 32) >= n_ctx_val as usize {
+                let keep = (n_ctx_val / 8).max(32) as usize;
+                let drop = (n_ctx_val / 4).max(64) as usize;
+                if n_past > keep + drop {
+                    let _ = ctx.kv_cache_seq_rm(0, Some(keep as u32), Some((keep + drop) as u32));
+                    let _ = ctx.kv_cache_seq_add(0, Some((keep + drop) as u32), Some(n_past as u32), -(drop as i32));
+                    cache.tokens.drain(keep..keep + drop);
                 }
             }
+            let n_past = cache.tokens.len();
 
-            // Prompt Lookup Decoding: Check for repeating N-grams in context
-            let mut ngram_candidates: Option<Vec<LlamaToken>> = None;
-            if config.use_ngram_speculative && cached_guard.len() >= 6 {
-                let ngram_len = 3;
-                let draft_len = 3;
-                let query = &cached_guard[cached_guard.len() - ngram_len..];
-                let search_limit = cached_guard.len() - ngram_len;
-                for i in (0..search_limit).rev() {
-                    if &cached_guard[i..i + ngram_len] == query {
-                        let start = i + ngram_len;
-                        let end = (start + draft_len).min(search_limit);
-                        if end > start {
-                            ngram_candidates = Some(cached_guard[start..end].to_vec());
-                            break;
-                        }
-                    }
-                }
-            }
+            let cands = if config.use_ngram_speculative {
+                ngram_draft(&cache.tokens, current_token, NGRAM_LEN, NGRAM_DRAFT)
+            } else {
+                None
+            };
 
-            if let Some(cands) = ngram_candidates {
-                // Batch-evaluate current token and all speculative candidates simultaneously
+            if let Some(cands) = cands {
+                // Evaluate the pending token and the drafted continuation in one pass.
+                // Logits at index i predict the token after batch[i], i.e. cands[i].
                 batch.clear();
-                batch.add(current_token, n_curr as i32, &[0], true)?;
+                batch.add(current_token, n_past as i32, &[0], true)?;
                 for (k, &cand) in cands.iter().enumerate() {
-                    batch.add(cand, (n_curr + 1 + k) as i32, &[0], true)?;
+                    batch.add(cand, (n_past + 1 + k) as i32, &[0], true)?;
                 }
                 ctx.decode(&mut batch)?;
+                cache.tokens.push(current_token);
 
-                // Verification pass
-                let mut verified = 0;
-                let mut next_token = sampler.sample(ctx, 0);
-                sampler.accept(next_token);
-
-                for (k, &cand) in cands.iter().enumerate() {
-                    if next_token == cand {
-                        verified += 1;
+                let mut finished = false;
+                let mut next_token = current_token;
+                for i in 0..=cands.len() {
+                    next_token = sampler.sample(ctx, i as i32);
+                    if self.model.is_eog_token(next_token) {
+                        finished = true;
+                        break;
+                    }
+                    if i < cands.len() && next_token == cands[i] {
+                        cache.tokens.push(cands[i]);
                         total_generated += 1;
-                        cached_guard.push(cand);
-                        if let Ok(piece) = self.model.token_to_piece(cand, &mut decoder, false, None) {
+                        if let Ok(piece) = self.model.token_to_piece(cands[i], &mut decoder, false, None) {
                             if !piece.is_empty() {
                                 let _ = tx.send(StreamEvent::Token(piece));
                             }
                         }
-                        if self.model.is_eog_token(cand) || total_generated >= config.max_tokens {
+                        if total_generated >= config.max_tokens {
+                            finished = true;
                             break;
                         }
-                        next_token = sampler.sample(ctx, (k + 1) as i32);
-                        sampler.accept(next_token);
                     } else {
                         break;
                     }
                 }
 
-                // If candidate mismatch occurred, accept next_token (the true model prediction)
-                if verified < cands.len() && !self.model.is_eog_token(current_token) && total_generated < config.max_tokens {
-                    total_generated += 1;
-                    cached_guard.push(next_token);
-                    if let Ok(piece) = self.model.token_to_piece(next_token, &mut decoder, false, None) {
-                        if !piece.is_empty() {
-                            let _ = tx.send(StreamEvent::Token(piece));
-                        }
-                    }
-                }
-
-                // Rollback any unverified speculative tokens from the KV cache
-                let valid_pos = n_curr + 1 + verified;
-                let _ = ctx.kv_cache_seq_rm(0, Some(valid_pos as u32), None);
-                n_curr = valid_pos;
-                current_token = next_token;
-
-                if self.model.is_eog_token(current_token) {
+                // Evict the drafted tokens that were not accepted
+                let keep = cache.tokens.len();
+                cache.rollback(ctx, keep);
+                if finished {
                     break;
                 }
+
+                // The target's own sample is always a real output token
+                current_token = next_token;
+                total_generated += 1;
+                if let Ok(piece) = self.model.token_to_piece(current_token, &mut decoder, false, None) {
+                    if !piece.is_empty() {
+                        let _ = tx.send(StreamEvent::Token(piece));
+                    }
+                }
             } else {
-                // Standard Autoregressive Single-Token Step
+                // Standard single-token step
                 batch.clear();
-                batch.add(current_token, n_curr as i32, &[0], true)?;
-                n_curr += 1;
+                batch.add(current_token, n_past as i32, &[0], true)?;
                 ctx.decode(&mut batch)?;
+                cache.tokens.push(current_token);
 
                 current_token = sampler.sample(ctx, 0);
-                sampler.accept(current_token);
-
                 if self.model.is_eog_token(current_token) {
                     break;
                 }
@@ -512,10 +582,10 @@ impl ModelEngine {
                         let _ = tx.send(StreamEvent::Token(piece));
                     }
                 }
-                cached_guard.push(current_token);
             }
         }
 
+        let context_used = cache.tokens.len();
         let elapsed = start_time.elapsed();
         let ttft_ms = first_token_time
             .map(|t| t.duration_since(start_time).as_millis())
@@ -536,7 +606,7 @@ impl ModelEngine {
             tokens_per_sec: tps,
             total_tokens: total_generated,
             prompt_tokens: n_prompt,
-            context_used: n_curr,
+            context_used,
             context_capacity: n_ctx_val,
             prefix_tokens_reused,
             prefix_cache_hit,
@@ -661,3 +731,57 @@ impl InferenceEngine {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn t(ids: &[i32]) -> Vec<LlamaToken> {
+        ids.iter().map(|&i| LlamaToken(i)).collect()
+    }
+
+    #[test]
+    fn prefix_partial_match() {
+        assert_eq!(reusable_prefix_len(&t(&[1, 2, 3, 4]), &t(&[1, 2, 9, 9, 9])), 2);
+    }
+
+    #[test]
+    fn prefix_no_match() {
+        assert_eq!(reusable_prefix_len(&t(&[5, 6]), &t(&[1, 2, 3])), 0);
+        assert_eq!(reusable_prefix_len(&[], &t(&[1, 2, 3])), 0);
+    }
+
+    #[test]
+    fn prefix_full_hit_leaves_last_token_for_reeval() {
+        // Regenerating the identical prompt must still decode one token so the
+        // logits are fresh, not whatever the previous generation left behind.
+        assert_eq!(reusable_prefix_len(&t(&[1, 2, 3]), &t(&[1, 2, 3])), 2);
+        // Prompt is a prefix of the cache (e.g. user deleted their last turn)
+        assert_eq!(reusable_prefix_len(&t(&[1, 2, 3, 4, 5]), &t(&[1, 2, 3])), 2);
+        assert_eq!(reusable_prefix_len(&t(&[7]), &t(&[7])), 0);
+    }
+
+    #[test]
+    fn ngram_finds_most_recent_continuation() {
+        // history ++ pending = [1 2 3 4 5 | 1 2 3 4 6 | 1 2] + 3
+        let hist = t(&[1, 2, 3, 4, 5, 1, 2, 3, 4, 6, 1, 2]);
+        let draft = ngram_draft(&hist, LlamaToken(3), 3, 3).unwrap();
+        // Most recent earlier "1 2 3" is at index 5, followed by 4 6 1
+        assert_eq!(draft, t(&[4, 6, 1]));
+    }
+
+    #[test]
+    fn ngram_draft_is_truncated_at_sequence_end() {
+        // history ++ pending = [1 2 3 1 2 3]; the match at index 0 is followed
+        // by [1 2 3] and then the sequence ends, so the draft is capped there.
+        let hist = t(&[1, 2, 3, 1, 2]);
+        let draft = ngram_draft(&hist, LlamaToken(3), 3, 8).unwrap();
+        assert_eq!(draft, t(&[1, 2, 3]));
+    }
+
+    #[test]
+    fn ngram_none_when_no_repeat_or_too_short() {
+        assert!(ngram_draft(&t(&[1, 2, 3, 4]), LlamaToken(5), 3, 3).is_none());
+        assert!(ngram_draft(&t(&[1, 2]), LlamaToken(3), 3, 3).is_none());
+    }
+}

@@ -19,7 +19,13 @@ impl Default for SiliconProfile {
 }
 
 impl SiliconProfile {
+    /// Probe once per process; callers on the generation path hit this per request.
     pub fn detect() -> Self {
+        static PROFILE: std::sync::OnceLock<SiliconProfile> = std::sync::OnceLock::new();
+        PROFILE.get_or_init(Self::probe).clone()
+    }
+
+    fn probe() -> Self {
         let chip_name = Command::new("sysctl")
             .arg("-n")
             .arg("machdep.cpu.brand_string")

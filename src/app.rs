@@ -72,6 +72,7 @@ pub struct App<'a> {
     pub top_p: f32,
     pub top_k: i32,
     pub ngram_speculative: bool,
+    pub seed: Option<u32>,
     pub scroll_offset: u16,
     pub max_scroll: u16,
     pub auto_scroll: bool,
@@ -96,6 +97,7 @@ impl<'a> App<'a> {
         top_p: f32,
         top_k: i32,
         ngram_speculative: bool,
+        seed: Option<u32>,
     ) -> Self {
         let hardware = SiliconProfile::detect();
         let installed_models = ModelManager::list_installed();
@@ -140,6 +142,7 @@ impl<'a> App<'a> {
             top_p,
             top_k,
             ngram_speculative,
+            seed,
             scroll_offset: 0,
             max_scroll: 0,
             auto_scroll: true,
@@ -316,16 +319,15 @@ impl<'a> App<'a> {
             top_p: self.top_p,
             top_k: self.top_k,
             use_ngram_speculative: self.ngram_speculative,
+            seed: self.seed,
         };
 
         // Spawn inference generation on blocking background thread
         tokio::task::spawn_blocking(move || {
-            let _ = engine.stream_generate_with_config(
-                &full_prompt,
-                &config,
-                cancel_token,
-                tx,
-            );
+            let tx_err = tx.clone();
+            if let Err(e) = engine.stream_generate_with_config(&full_prompt, &config, cancel_token, tx) {
+                let _ = tx_err.send(StreamEvent::Error(e.to_string()));
+            }
         });
     }
 
