@@ -1,2 +1,18 @@
-/target
-/dist
+# Build output
+/target/
+/dist/
+
+# Model weights and partial downloads (live in ~/.nirvana/models)
+*.gguf
+*.download
+
+# macOS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Local secrets / overrides
+.env
