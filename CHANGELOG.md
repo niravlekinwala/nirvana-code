@@ -42,9 +42,44 @@ All notable changes to this project are documented here. The format follows
 - `SiliconProfile::detect()` spawned two `sysctl` processes per generation; it is
   now probed once per process.
 
+- **Chat templates**: prompts are rendered with the GGUF's own Jinja template
+  (minijinja, as llama-server does), falling back to llama.cpp's built-in
+  matcher and then ChatML. Gemma 4 previously received ChatML and echoed
+  `<|im_end|>`. Over-long conversations drop whole turns instead of cutting
+  tokens mid-template.
+- **Hardware probe** reads P/E cores, RAM, and `iogpu.wired_limit_mb` via
+  `sysctlbyname` and GPU cores from the I/O registry; no more process spawns or
+  brand-string guessing (the M2 Pro table said 16 GPU cores; it has 19).
+- **Copy-button XSS in the web UI**: model output was inlined into an `onclick`
+  through `encodeURIComponent`, which leaves `'` unencoded.
+- Attachment PDF/OCR no longer JIT-compiles Swift per call (seconds → ~120 ms).
+
+### Security
+- `/v1/project/*` confined to `--workspace`; CORS off by default
+  (`--cors-origin` opts in); `--api-key` bearer auth with auto-generation off
+  loopback; `Host` header check; model loads by API restricted to installed
+  models; per-request stop tokens; Unix socket `0600`.
+
+### Added
+- `InferenceEngine::Speculative`: `--draft-model` works in the TUI and server,
+  draft length adapts 1–16 (`--n-draft` sets the start).
+- `--persist-kv`: prefix KV state saved on exit and restored on start.
+- Sampler penalties (`--repeat-penalty`, `--dry-multiplier`; API
+  `frequency_penalty` / `presence_penalty`), `--ubatch`, `--verbose`, `--seed`.
+- `bench --runs N --json`: median prefill/decode/cold-warm TTFT.
+- `~/.config/nirvana-code/config.toml`.
+- Resumable, SHA-256-verified downloads.
+- Memory fit: llama.cpp `fit_params` offload split, mlock auto-off above 70 %
+  RAM, `iogpu.wired_limit_mb` advisory.
+- Web UI split into `index.html` / `app.css` / `app.js`.
+- Homebrew formula template (`packaging/`), release build script (`scripts/`),
+  dependabot.
+
 ### Changed
 - Sampler chain reordered to llama.cpp's default (top-k → top-p → min-p → temperature).
 - Model-gated engine tests added (`NIRVANA_TEST_MODEL`, `NIRVANA_TEST_DRAFT`).
+- MLX backend labelled experimental (subprocess `mlx_lm` over HTTP).
+- README rewritten around measured numbers and the server's security model.
 
 ## [0.2.0]
 
