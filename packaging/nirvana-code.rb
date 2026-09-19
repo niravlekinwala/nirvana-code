@@ -1,24 +1,24 @@
-# Homebrew formula. Host it in a tap (e.g. github.com/<you>/homebrew-nirvana)
-# as Formula/nirvana-code.rb, then: brew install <you>/nirvana/nirvana-code
+# Homebrew formula. Host it in a tap (e.g. github.com/niravlekinwala/homebrew-nirvana)
+# as Formula/nirvana-code.rb, then: brew install niravlekinwala/nirvana/nirvana-code
 #
 # Fill in `url` and `sha256` from a GitHub release produced by
 # scripts/build-release.sh (its .sha256 file has the value). Building from
 # source is also supported via `--HEAD`.
 class NirvanaCode < Formula
   desc "Local coding assistant for Apple Silicon: TUI, web UI and OpenAI-compatible API on llama.cpp/Metal"
-  homepage "https://github.com/<you>/nirvana-code"
-  version "0.2.0"
+  homepage "https://github.com/niravlekinwala/nirvana-code"
+  version "0.3.0"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/<you>/nirvana-code/releases/download/v#{version}/nirvana-code-#{version}-aarch64-apple-darwin.tar.gz"
+      url "https://github.com/niravlekinwala/nirvana-code/releases/download/v#{version}/nirvana-code-#{version}-aarch64-apple-darwin.tar.gz"
       sha256 "REPLACE_WITH_SHA256_FROM_RELEASE"
     end
   end
 
   head do
-    url "https://github.com/<you>/nirvana-code.git", branch: "main"
+    url "https://github.com/niravlekinwala/nirvana-code.git", branch: "main"
     depends_on "rust" => :build
     depends_on "cmake" => :build
   end
