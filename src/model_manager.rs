@@ -455,6 +455,9 @@ impl ModelManager {
     }
 
     pub async fn download_file(filename: &str, url: &str) -> Result<PathBuf> {
+        use sha2::{Digest, Sha256};
+        use std::io::{Read, Seek};
+
         let dir = Self::default_dir()?;
         let target_path = dir.join(filename);
         if target_path.exists() {
@@ -464,47 +467,104 @@ impl ModelManager {
 
         let temp_path = dir.join(format!("{filename}.download"));
 
-        println!("⚡ [NIRVANA CODE] Downloading Silicon-Optimized Model for Apple Silicon:");
+        println!("⚡ [NIRVANA CODE] Downloading model:");
         println!("   Filename: {filename}");
         println!("   URL:      {url}");
         println!("   Target:   {}\n", target_path.display());
 
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(3600)) // 1 hour timeout for large models
+            .timeout(std::time::Duration::from_secs(3600)) // 1 hour for large models
             .build()?;
 
-        let res = client
-            .get(url)
-            .send()
-            .await
-            .context("Failed to initiate download stream")?;
+        // Probe the origin (not the CDN it redirects to) for the expected
+        // SHA-256: Hugging Face puts the LFS object hash in X-Linked-ETag on
+        // the redirect response. A plain ETag is a CDN artefact, never a hash.
+        let probe = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?;
+        let head = probe.head(url).send().await.context("Failed to reach download URL")?;
+        if !(head.status().is_success() || head.status().is_redirection()) {
+            bail!("Download request failed with HTTP status: {}", head.status());
+        }
+        let expected_sha = head
+            .headers()
+            .get("x-linked-etag")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.trim_matches('"').to_ascii_lowercase())
+            .filter(|v| v.len() == 64 && v.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // Resume a partial download; a 206 below confirms the server honoured it
+        let mut resume_from = fs::metadata(&temp_path).map(|m| m.len()).unwrap_or(0);
+
+        let mut req = client.get(url);
+        if resume_from > 0 {
+            req = req.header("Range", format!("bytes={resume_from}-"));
+        }
+        let res = req.send().await.context("Failed to initiate download stream")?;
         let status = res.status();
+        if resume_from > 0 && status != reqwest::StatusCode::PARTIAL_CONTENT {
+            // Server ignored the range: start over
+            resume_from = 0;
+        }
         if !status.is_success() {
             bail!("Download request failed with HTTP status: {status}");
         }
 
-        let total_size = res.content_length().unwrap_or(0);
+        let remaining = res.content_length().unwrap_or(0);
+        let total_size = resume_from + remaining;
         let pb = ProgressBar::new(total_size);
         pb.set_style(
             ProgressStyle::default_bar()
                 .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
                 .progress_chars("#>-"),
         );
+        pb.set_position(resume_from);
+        if resume_from > 0 {
+            println!("   Resuming from {:.1} MB", resume_from as f64 / 1e6);
+        }
 
-        let mut file = File::create(&temp_path)?;
+        let mut file = if resume_from > 0 {
+            fs::OpenOptions::new().append(true).open(&temp_path)?
+        } else {
+            File::create(&temp_path)?
+        };
         let mut stream = res.bytes_stream();
 
         while let Some(chunk) = stream.next().await {
-            let data = chunk.context("Error while downloading stream chunk")?;
+            let data = chunk.context("Error while downloading stream chunk (re-run to resume)")?;
             file.write_all(&data)?;
             pb.inc(data.len() as u64);
         }
-
-        pb.finish_with_message("Download complete!");
+        pb.finish_with_message("Download complete");
+        file.flush()?;
         drop(file);
 
+        // Verify against the server-advertised hash when available
+        if let Some(expected) = expected_sha {
+            let mut f = File::open(&temp_path)?;
+            f.seek(std::io::SeekFrom::Start(0))?;
+            let mut hasher = Sha256::new();
+            let mut buf = vec![0u8; 8 << 20];
+            loop {
+                let n = f.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
+            let actual = format!("{:x}", hasher.finalize());
+            if actual != expected {
+                let _ = fs::remove_file(&temp_path);
+                bail!("SHA-256 mismatch for {filename}: expected {expected}, got {actual}. The partial file was removed; run the download again.");
+            }
+            println!("   SHA-256:  {actual} ✔");
+        } else {
+            println!("   SHA-256:  (server did not advertise a hash; skipped)");
+        }
+
         fs::rename(&temp_path, &target_path)?;
-        println!("\n✔ Model successfully cached at: {}", target_path.display());
+        println!("\n✔ Model cached at: {}", target_path.display());
 
         Ok(target_path)
     }
