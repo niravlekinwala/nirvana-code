@@ -24,10 +24,11 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
         run: cargo test
-      - name: Release build (portable apple-m1 baseline)
+      - name: Release build (portable M1 baseline; see scripts/build-release.sh)
         run: cargo build --release
         env:
-          RUSTFLAGS: "-C target-cpu=apple-m1"
+          RUSTFLAGS: ""
+          GGML_CPU_ARM_ARCH: "armv8.4-a+dotprod+fp16"
 
   catalog-urls:
     name: Verify model catalog URLs

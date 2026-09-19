@@ -62,7 +62,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 - `InferenceEngine::Speculative`: `--draft-model` works in the TUI and server,
-  draft length adapts 1–16 (`--n-draft` sets the start).
+  draft length adapts 1–16 (`--n-draft` sets the start) and drafting stops when
+  the draft's confidence drops below 0.75 (llama.cpp's `p_min`). Measured on
+  M2 Pro, Qwen2.5-Coder-7B Q4_K_M + 0.5B draft: 38.7 vs 35.7 tok/s (+8 %) at
+  82 % acceptance; without the gate it was 31.7 tok/s (slower than plain).
+- `qwen-coder-7b` catalog entry.
 - `--persist-kv`: prefix KV state saved on exit and restored on start.
 - Sampler penalties (`--repeat-penalty`, `--dry-multiplier`; API
   `frequency_penalty` / `presence_penalty`), `--ubatch`, `--verbose`, `--seed`.
