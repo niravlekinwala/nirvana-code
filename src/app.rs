@@ -312,6 +312,7 @@ impl<'a> App<'a> {
             top_k: self.top_k,
             use_ngram_speculative: self.ngram_speculative,
             seed: self.seed,
+            ..GenerationConfig::default()
         };
 
         // Spawn inference generation on blocking background thread

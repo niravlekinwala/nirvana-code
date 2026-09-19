@@ -178,6 +178,7 @@ impl SpeculativeEngine {
             .with_n_batch(n_batch)
             .with_n_ubatch(n_ubatch)
             .with_flash_attention_policy(llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_ENABLED)
+            .with_no_perf(true)
             .with_type_k(self.kv_mode.to_llama_type())
             .with_type_v(self.kv_mode.to_llama_type())
     }
@@ -234,7 +235,7 @@ impl SpeculativeEngine {
         }
 
         let n_batch = 2048.min(n_ctx_val);
-        let n_ubatch = 512.min(n_batch);
+        let n_ubatch = crate::engine::ubatch_size().min(n_batch);
         let batch_size = (n_batch as usize).min(512);
 
         // 2. Persistent contexts and prefix caches for both models
@@ -263,7 +264,7 @@ impl SpeculativeEngine {
 
         // 3. Samplers: the draft is always greedy — its job is to guess what the
         //    target will pick, and the target's own sampler makes the real choice.
-        let mut target_sampler = build_sampler(config);
+        let mut target_sampler = build_sampler(&self.target_model, config);
         let mut draft_sampler = LlamaSampler::greedy();
         let mut decoder = encoding_rs::UTF_8.new_decoder();
 
@@ -366,7 +367,9 @@ impl SpeculativeEngine {
             // Evict rejected draft tokens from the target KV
             let keep = t_cache.tokens.len();
             let n_acc = keep - n_past - 1;
-            t_cache.rollback(t_ctx, keep);
+            if !t_cache.rollback(t_ctx, keep) {
+                bail!("KV cache refused to evict rejected draft tokens");
+            }
             if finished {
                 break;
             }

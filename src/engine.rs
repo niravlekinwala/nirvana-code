@@ -8,7 +8,7 @@ use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
 use std::num::NonZeroU32;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
@@ -78,6 +78,14 @@ pub struct GenerationConfig {
     /// Sampler RNG seed. `None` draws a fresh seed per generation so regenerating
     /// the same prompt gives a different answer.
     pub seed: Option<u32>,
+    /// Classic repetition penalty over the last `penalty_last_n` tokens; 1.0 = off.
+    pub repeat_penalty: f32,
+    /// OpenAI-style frequency / presence penalties; 0.0 = off.
+    pub frequency_penalty: f32,
+    pub presence_penalty: f32,
+    pub penalty_last_n: i32,
+    /// DRY (don't repeat yourself) multiplier; 0.0 = off.
+    pub dry_multiplier: f32,
 }
 
 impl Default for GenerationConfig {
@@ -90,6 +98,11 @@ impl Default for GenerationConfig {
             top_k: 40,
             use_ngram_speculative: false,
             seed: None,
+            repeat_penalty: 1.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            penalty_last_n: 64,
+            dry_multiplier: 0.0,
         }
     }
 }
@@ -103,20 +116,45 @@ impl GenerationConfig {
     }
 }
 
-/// Build the sampler chain for a generation. Greedy below a tiny temperature,
-/// otherwise llama.cpp's default order (top-k → top-p → min-p → temperature).
-pub(crate) fn build_sampler(config: &GenerationConfig) -> LlamaSampler {
+/// Build the sampler chain for a generation: optional repetition/DRY
+/// penalties first, then greedy below a tiny temperature, otherwise
+/// llama.cpp's default order (top-k → top-p → min-p → temperature).
+pub(crate) fn build_sampler(model: &LlamaModel, config: &GenerationConfig) -> LlamaSampler {
+    let mut chain: Vec<LlamaSampler> = Vec::with_capacity(7);
+    let penalties_on = (config.repeat_penalty - 1.0).abs() > f32::EPSILON
+        || config.frequency_penalty.abs() > f32::EPSILON
+        || config.presence_penalty.abs() > f32::EPSILON;
+    if penalties_on {
+        chain.push(LlamaSampler::penalties(
+            model.n_vocab(),
+            config.penalty_last_n,
+            config.repeat_penalty,
+            config.frequency_penalty,
+            config.presence_penalty,
+        ));
+    }
+    if config.dry_multiplier > 0.0 {
+        chain.push(LlamaSampler::dry(
+            model,
+            config.dry_multiplier,
+            1.75,
+            2,
+            config.penalty_last_n,
+            ["\n", ":", "\"", "*"],
+        ));
+    }
     if config.temperature <= 0.05 {
-        LlamaSampler::greedy()
+        chain.push(LlamaSampler::greedy());
     } else {
-        LlamaSampler::chain_simple([
+        chain.extend([
             LlamaSampler::top_k(config.top_k),
             LlamaSampler::top_p(config.top_p, 1),
             LlamaSampler::min_p(config.min_p, 1),
             LlamaSampler::temp(config.temperature),
             LlamaSampler::dist(config.resolve_seed()),
-        ])
+        ]);
     }
+    LlamaSampler::chain_simple(chain)
 }
 
 /// Pin the calling thread to User-Interactive QoS so macOS schedules the
@@ -148,21 +186,31 @@ impl PrefixCache {
     /// from whatever the previous generation left behind).
     pub(crate) fn sync(&mut self, ctx: &mut LlamaContext, prompt: &[LlamaToken]) -> usize {
         let common = reusable_prefix_len(&self.tokens, prompt);
-        self.rollback(ctx, common);
-        common
+        if self.rollback(ctx, common) {
+            common
+        } else {
+            // The memory refused a partial removal (e.g. an SWA window that
+            // no longer holds those positions): start over.
+            self.rollback(ctx, 0);
+            0
+        }
     }
 
     /// Drop everything at position >= `keep` from the KV cache and the mirror.
     /// The KV is always trimmed, even when the mirror is already short: after
     /// speculative verification the KV holds rejected draft tokens the mirror
     /// never recorded.
-    pub(crate) fn rollback(&mut self, ctx: &mut LlamaContext, keep: usize) {
-        if keep == 0 {
+    /// Returns `false` if the KV refused the partial removal; the mirror is
+    /// still truncated so the caller can decide how to recover.
+    pub(crate) fn rollback(&mut self, ctx: &mut LlamaContext, keep: usize) -> bool {
+        let ok = if keep == 0 {
             ctx.clear_kv_cache();
+            true
         } else {
-            let _ = ctx.kv_cache_seq_rm(0, Some(keep as u32), None);
-        }
+            ctx.kv_cache_seq_rm(0, Some(keep as u32), None).is_ok()
+        };
         self.tokens.truncate(keep);
+        ok
     }
 
     /// Decode `tokens` starting at the current end of the cache, in chunks no
@@ -365,6 +413,22 @@ pub(crate) fn load_model_fitted(
     Ok(LlamaModel::load_from_file(backend, model_path, &params)?)
 }
 
+const SESSION_MAX_TOKENS: usize = 1024;
+
+static UBATCH: AtomicU32 = AtomicU32::new(512);
+
+/// Physical micro-batch for prefill (`--ubatch`). 512 is llama.cpp's default
+/// and what we measured as best on M2 Pro; larger GPUs may prefer 1024.
+pub fn set_ubatch(n: Option<u32>) {
+    if let Some(n) = n {
+        UBATCH.store(n.clamp(32, 4096), Ordering::Relaxed);
+    }
+}
+
+pub fn ubatch_size() -> u32 {
+    UBATCH.load(Ordering::Relaxed)
+}
+
 pub struct ModelEngine {
     // Persistent context for prefix caching across generations. Declared
     // before `model`: Rust drops fields in declaration order and the context
@@ -373,6 +437,7 @@ pub struct ModelEngine {
     cached_tokens: Mutex<PrefixCache>,
     backend: Arc<SharedBackend>,
     pub model: Arc<LlamaModel>,
+    pub model_path: PathBuf,
     chat: ChatRenderer,
     pub kv_mode: KvQuantMode,
     pub use_mlock: bool,
@@ -432,6 +497,7 @@ impl ModelEngine {
             cached_tokens: Mutex::new(PrefixCache::default()),
             backend,
             model,
+            model_path: model_path.to_path_buf(),
             chat,
             kv_mode: resolved_kv,
             use_mlock,
@@ -442,6 +508,88 @@ impl ModelEngine {
 
     pub fn chat_format_label(&self) -> &'static str {
         self.chat.label()
+    }
+
+    /// Create the persistent context on first use.
+    fn ensure_context(&self, slot: &mut Option<LlamaContext<'static>>) -> Result<()> {
+        if slot.is_some() {
+            return Ok(());
+        }
+        let n_ctx_val = self.n_ctx.load(Ordering::Relaxed);
+        let n_batch = 2048.min(n_ctx_val);
+        let n_ubatch = ubatch_size().min(n_batch);
+        let p_cores = SiliconProfile::detect().p_cores.max(1) as i32;
+        let ctx_params = LlamaContextParams::default()
+            .with_n_ctx(Some(NonZeroU32::new(n_ctx_val).unwrap()))
+            .with_n_threads(p_cores)
+            .with_n_threads_batch(p_cores)
+            .with_n_batch(n_batch)
+            .with_n_ubatch(n_ubatch)
+            .with_flash_attention_policy(llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_ENABLED)
+            // Timing counters cost a little per decode and we measure ourselves
+            .with_no_perf(true)
+            .with_type_k(self.kv_mode.to_llama_type())
+            .with_type_v(self.kv_mode.to_llama_type());
+        let ctx = self.model.new_context(&self.backend, ctx_params)?;
+        // Safety: model is owned in Arc<LlamaModel> on self, declared after
+        // `context`, so it is dropped later.
+        let static_ctx: LlamaContext<'static> = unsafe { std::mem::transmute(ctx) };
+        *slot = Some(static_ctx);
+        Ok(())
+    }
+
+    /// Where this model's prefix KV state is persisted (`--persist-kv`).
+    pub fn session_path(&self) -> Option<PathBuf> {
+        let stem = self.model_path.file_stem()?.to_string_lossy().to_string();
+        let dir = dirs::home_dir()?.join(".nirvana").join("kv");
+        Some(dir.join(format!("{stem}-{}-{:?}.bin", self.n_ctx.load(Ordering::Relaxed), self.kv_mode)))
+    }
+
+    /// Persist the first `SESSION_MAX_TOKENS` tokens of the KV state so the
+    /// next process starts with the system prompt already evaluated.
+    pub fn save_session(&self) -> Result<usize> {
+        let Some(path) = self.session_path() else { return Ok(0) };
+        let mut ctx_guard = self.context.lock().unwrap();
+        let Some(ctx) = ctx_guard.as_mut() else { return Ok(0) };
+        let mut cache = self.cached_tokens.lock().unwrap();
+        if cache.tokens.is_empty() {
+            return Ok(0);
+        }
+        let keep = cache.tokens.len().min(SESSION_MAX_TOKENS);
+        if !cache.rollback(ctx, keep) {
+            return Ok(0);
+        }
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        ctx.state_seq_save_file(&path, 0, &cache.tokens)
+            .map_err(|e| anyhow::anyhow!("save KV state: {e}"))?;
+        Ok(keep)
+    }
+
+    /// Restore a persisted prefix; returns how many tokens are now warm.
+    pub fn load_session(&self) -> Result<usize> {
+        let Some(path) = self.session_path() else { return Ok(0) };
+        if !path.exists() {
+            return Ok(0);
+        }
+        let mut ctx_guard = self.context.lock().unwrap();
+        self.ensure_context(&mut ctx_guard)?;
+        let ctx = ctx_guard.as_mut().unwrap();
+        let n_ctx = self.n_ctx.load(Ordering::Relaxed) as usize;
+        match ctx.state_seq_load_file(&path, 0, n_ctx) {
+            Ok((tokens, _)) => {
+                let n = tokens.len();
+                self.cached_tokens.lock().unwrap().tokens = tokens;
+                Ok(n)
+            }
+            Err(_) => {
+                // Stale or incompatible file (different build/quant): drop it
+                let _ = std::fs::remove_file(&path);
+                ctx.clear_kv_cache();
+                Ok(0)
+            }
+        }
     }
 
     /// Render a conversation with the model's own chat template.
@@ -508,7 +656,7 @@ impl ModelEngine {
             top_p: 0.9,
             top_k: 40,
             use_ngram_speculative: false,
-            seed: None,
+            ..GenerationConfig::default()
         };
         self.stream_generate_with_config(prompt, &config, cancel_token, tx)
     }
@@ -558,28 +706,10 @@ impl ModelEngine {
 
         let n_ctx_val = self.n_ctx.load(Ordering::Relaxed);
         let n_batch = 2048.min(n_ctx_val);
-        let n_ubatch = 512.min(n_batch);
-        let p_cores = SiliconProfile::detect().p_cores.max(1) as i32;
 
         // 2. Lock and acquire or initialize persistent context
         let mut ctx_guard = self.context.lock().unwrap();
-        if ctx_guard.is_none() {
-            let ctx_params = LlamaContextParams::default()
-                .with_n_ctx(Some(NonZeroU32::new(n_ctx_val).unwrap()))
-                .with_n_threads(p_cores)
-                .with_n_threads_batch(p_cores)
-                .with_n_batch(n_batch)
-                .with_n_ubatch(n_ubatch)
-                .with_flash_attention_policy(llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_ENABLED)
-                .with_type_k(self.kv_mode.to_llama_type())
-                .with_type_v(self.kv_mode.to_llama_type());
-
-            let ctx = self.model.new_context(&self.backend, ctx_params)?;
-            // Safety: model is owned in Arc<LlamaModel> and outlives context
-            let static_ctx: LlamaContext<'static> = unsafe { std::mem::transmute(ctx) };
-            *ctx_guard = Some(static_ctx);
-        }
-
+        self.ensure_context(&mut ctx_guard)?;
         let ctx = ctx_guard.as_mut().unwrap();
 
         // 3. Prefix cache: roll back to the shared prefix, then evaluate the rest
@@ -595,7 +725,7 @@ impl ModelEngine {
         }
 
         // 4. Sampler
-        let mut sampler = build_sampler(config);
+        let mut sampler = build_sampler(&self.model, config);
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut total_generated = 0;
 
@@ -616,8 +746,12 @@ impl ModelEngine {
         }
 
         // 5. Autoregressive / prompt-lookup generation loop
+        // Code repeats itself: a 3-gram hit usually continues for a while, so
+        // draft generously; fall back to 2-grams with a short draft.
         const NGRAM_LEN: usize = 3;
-        const NGRAM_DRAFT: usize = 3;
+        const NGRAM_DRAFT: usize = 8;
+        const NGRAM_LEN_FALLBACK: usize = 2;
+        const NGRAM_DRAFT_FALLBACK: usize = 4;
         while total_generated < config.max_tokens {
             if cancel_token.load(Ordering::Relaxed) {
                 break;
@@ -638,7 +772,9 @@ impl ModelEngine {
             let n_past = cache.tokens.len();
 
             let cands = if config.use_ngram_speculative {
-                ngram_draft(&cache.tokens, current_token, NGRAM_LEN, NGRAM_DRAFT)
+                ngram_draft(&cache.tokens, current_token, NGRAM_LEN, NGRAM_DRAFT).or_else(|| {
+                    ngram_draft(&cache.tokens, current_token, NGRAM_LEN_FALLBACK, NGRAM_DRAFT_FALLBACK)
+                })
             } else {
                 None
             };
@@ -681,7 +817,9 @@ impl ModelEngine {
 
                 // Evict the drafted tokens that were not accepted
                 let keep = cache.tokens.len();
-                cache.rollback(ctx, keep);
+                if !cache.rollback(ctx, keep) {
+                    bail!("KV cache refused to evict rejected draft tokens");
+                }
                 if finished {
                     break;
                 }
@@ -817,6 +955,21 @@ impl InferenceEngine {
             InferenceEngine::Gguf(e) => e.stream_chat(messages, config, cancel_token, tx),
             InferenceEngine::Mlx(e) => e.stream_chat(messages, config, cancel_token, tx),
             InferenceEngine::Speculative(e) => e.stream_chat(messages, config, cancel_token, tx),
+        }
+    }
+
+    /// `--persist-kv`: restore the saved prefix state, if any.
+    pub fn load_session(&self) -> Result<usize> {
+        match self {
+            InferenceEngine::Gguf(e) => e.load_session(),
+            _ => Ok(0),
+        }
+    }
+
+    pub fn save_session(&self) -> Result<usize> {
+        match self {
+            InferenceEngine::Gguf(e) => e.save_session(),
+            _ => Ok(0),
         }
     }
 

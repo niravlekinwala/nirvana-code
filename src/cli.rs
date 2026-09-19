@@ -132,6 +132,36 @@ pub struct Cli {
     pub top_k: i32,
 
     #[arg(
+        long = "repeat-penalty",
+        global = true,
+        default_value = "1.0",
+        help = "Repetition penalty over the last 64 tokens (1.0 = off, 1.1 = mild)"
+    )]
+    pub repeat_penalty: f32,
+
+    #[arg(
+        long = "dry-multiplier",
+        global = true,
+        default_value = "0.0",
+        help = "DRY anti-repetition multiplier (0 = off, 0.8 = typical)"
+    )]
+    pub dry_multiplier: f32,
+
+    #[arg(
+        long = "ubatch",
+        global = true,
+        help = "Physical micro-batch size for prefill (default 512; try 1024 on 30+ GPU-core chips)"
+    )]
+    pub ubatch: Option<u32>,
+
+    #[arg(
+        long = "persist-kv",
+        global = true,
+        help = "Save the KV state of the prefix (up to 1024 tokens) on exit and restore it next start"
+    )]
+    pub persist_kv: bool,
+
+    #[arg(
         long = "seed",
         global = true,
         help = "Sampler RNG seed for reproducible output (random per generation if unset)"

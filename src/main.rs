@@ -126,6 +126,7 @@ async fn main() -> Result<()> {
         cli.top_k,
         cli.ngram_speculative,
         cli.seed,
+        cli.persist_kv,
     )?;
     Ok(())
 }
@@ -133,22 +134,44 @@ async fn main() -> Result<()> {
 /// Load the configured backend: MLX for MLX directories, GGUF otherwise, and
 /// GGUF + draft when `--draft-model` or `--speculative` is given.
 fn load_engine(cli: &Cli, model_path: &Path, kv_mode: KvQuantMode) -> Result<InferenceEngine> {
-    if ModelManager::is_mlx_model(model_path) || !(cli.speculative || cli.draft_model.is_some()) {
-        return InferenceEngine::load(model_path, cli.gpu_layers, !cli.no_mlock, kv_mode, cli.ctx_size);
+    engine::set_ubatch(cli.ubatch);
+    let engine = if ModelManager::is_mlx_model(model_path) || !(cli.speculative || cli.draft_model.is_some()) {
+        InferenceEngine::load(model_path, cli.gpu_layers, !cli.no_mlock, kv_mode, cli.ctx_size)?
+    } else {
+        let draft_path = ModelManager::resolve_model_path(cli.draft_model.as_deref())
+            .or_else(|| ModelManager::resolve_model_path(Some(Path::new("qwen-0.5b"))))
+            .context("No draft model found for speculative decoding. Run 'nirvana-code download qwen-0.5b'")?;
+        println!("   Draft model: {} (speculative decoding, K adapts 1–16)", draft_path.display());
+        InferenceEngine::load_speculative(
+            model_path,
+            &draft_path,
+            cli.gpu_layers,
+            !cli.no_mlock,
+            kv_mode,
+            cli.ctx_size,
+            cli.n_draft,
+        )?
+    };
+    if cli.persist_kv {
+        match engine.load_session() {
+            Ok(0) => {}
+            Ok(n) => println!("   KV state:    restored {n} prefix tokens from disk"),
+            Err(e) => eprintln!("   KV state:    could not restore ({e})"),
+        }
     }
-    let draft_path = ModelManager::resolve_model_path(cli.draft_model.as_deref())
-        .or_else(|| ModelManager::resolve_model_path(Some(Path::new("qwen-0.5b"))))
-        .context("No draft model found for speculative decoding. Run 'nirvana-code download qwen-0.5b'")?;
-    println!("   Draft model: {} (speculative decoding, K adapts 1–16)", draft_path.display());
-    InferenceEngine::load_speculative(
-        model_path,
-        &draft_path,
-        cli.gpu_layers,
-        !cli.no_mlock,
-        kv_mode,
-        cli.ctx_size,
-        cli.n_draft,
-    )
+    Ok(engine)
+}
+
+/// `--persist-kv`: write the prefix state so the next start is warm.
+fn persist_session(cli: &Cli, engine: &InferenceEngine) {
+    if !cli.persist_kv {
+        return;
+    }
+    match engine.save_session() {
+        Ok(0) => {}
+        Ok(n) => eprintln!("   KV state:    saved {n} prefix tokens"),
+        Err(e) => eprintln!("   KV state:    save failed ({e})"),
+    }
 }
 
 /// Assemble server options from the CLI. `web` mode defaults the workspace to
@@ -190,6 +213,7 @@ fn server_options(
         host: host.to_string(),
         port,
         socket_path,
+        persist_kv: cli.persist_kv,
         gpu_layers: cli.gpu_layers,
         use_mlock: !cli.no_mlock,
         kv_mode,
@@ -288,6 +312,9 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize) -> Result<()> {
         top_k: cli.top_k,
         use_ngram_speculative: cli.ngram_speculative,
         seed: cli.seed,
+        repeat_penalty: cli.repeat_penalty,
+        dry_multiplier: cli.dry_multiplier,
+        ..GenerationConfig::default()
     };
 
     // Turn 1: Cold Cache Prefill
@@ -381,8 +408,12 @@ async fn cmd_single_shot(cli: &Cli, prompt: &str, preset: &str) -> Result<()> {
         top_k: cli.top_k,
         use_ngram_speculative: cli.ngram_speculative,
         seed: cli.seed,
+        repeat_penalty: cli.repeat_penalty,
+        dry_multiplier: cli.dry_multiplier,
+        ..GenerationConfig::default()
     };
 
+    let engine_after = engine.clone();
     tokio::task::spawn_blocking(move || {
         let tx_err = tx.clone();
         if let Err(e) = engine.stream_chat(&messages, &config, cancel, tx) {
@@ -416,6 +447,7 @@ async fn cmd_single_shot(cli: &Cli, prompt: &str, preset: &str) -> Result<()> {
         }
     }
 
+    persist_session(cli, &engine_after);
     Ok(())
 }
 
@@ -497,6 +529,7 @@ fn run_tui(
     top_k: i32,
     ngram_speculative: bool,
     seed: Option<u32>,
+    persist_kv: bool,
 ) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -528,6 +561,15 @@ fn run_tui(
 
     if let Err(e) = res {
         eprintln!("Nirvana Code execution error: {e:?}");
+    }
+
+    if persist_kv {
+        app.cancel_generation();
+        match app.engine.save_session() {
+            Ok(n) if n > 0 => eprintln!("KV state: saved {n} prefix tokens"),
+            Ok(_) => {}
+            Err(e) => eprintln!("KV state: save failed ({e})"),
+        }
     }
 
     Ok(())

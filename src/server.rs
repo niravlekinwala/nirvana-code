@@ -49,6 +49,7 @@ pub struct ServerOptions {
     pub host: String,
     pub port: u16,
     pub socket_path: Option<PathBuf>,
+    pub persist_kv: bool,
     pub gpu_layers: u32,
     pub use_mlock: bool,
     pub kv_mode: KvQuantMode,
@@ -192,6 +193,14 @@ pub struct ChatCompletionRequest {
     pub ngram_speculative: bool,
     #[serde(default)]
     pub seed: Option<u32>,
+    #[serde(default = "default_repeat_penalty")]
+    pub repeat_penalty: f32,
+    #[serde(default)]
+    pub frequency_penalty: f32,
+    #[serde(default)]
+    pub presence_penalty: f32,
+    #[serde(default)]
+    pub dry_multiplier: f32,
     #[serde(default)]
     pub attachment: Option<AttachmentPayloadDto>,
 }
@@ -216,6 +225,9 @@ fn default_top_p() -> f32 {
 }
 fn default_top_k() -> i32 {
     40
+}
+fn default_repeat_penalty() -> f32 {
+    1.0
 }
 
 #[derive(Debug, Serialize)]
@@ -1150,6 +1162,11 @@ async fn handle_chat_completions(
         top_k: payload.top_k,
         use_ngram_speculative: payload.ngram_speculative,
         seed: payload.seed,
+        repeat_penalty: payload.repeat_penalty,
+        frequency_penalty: payload.frequency_penalty,
+        presence_penalty: payload.presence_penalty,
+        dry_multiplier: payload.dry_multiplier,
+        ..GenerationConfig::default()
     };
 
     let (tx, mut rx) = unbounded_channel();
@@ -1325,7 +1342,7 @@ pub async fn run_server(
     model_path: PathBuf,
     opts: ServerOptions,
 ) -> Result<()> {
-    let ServerOptions { host, port, socket_path, gpu_layers, use_mlock, kv_mode, ctx_size, security } = opts;
+    let ServerOptions { host, port, socket_path, persist_kv, gpu_layers, use_mlock, kv_mode, ctx_size, security } = opts;
     let host = host.as_str();
     let inner = Arc::new(RwLock::new(ServerEngineInner {
         engine,
@@ -1335,7 +1352,7 @@ pub async fn run_server(
 
     let security = Arc::new(security);
     let state = ServerState {
-        inner,
+        inner: inner.clone(),
         gpu_layers,
         use_mlock,
         kv_mode,
@@ -1391,7 +1408,25 @@ pub async fn run_server(
 
     let addr = format!("{host}:{port}");
     let tcp_listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(tcp_listener, app).await?;
+    axum::serve(tcp_listener, app)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+            println!("\n⏹  Shutting down...");
+        })
+        .await?;
+
+    if persist_kv {
+        let engine = state_inner_engine(&inner).await;
+        match tokio::task::spawn_blocking(move || engine.save_session()).await {
+            Ok(Ok(n)) if n > 0 => println!("   KV state:    saved {n} prefix tokens"),
+            Ok(Err(e)) => eprintln!("   KV state:    save failed ({e})"),
+            _ => {}
+        }
+    }
 
     Ok(())
+}
+
+async fn state_inner_engine(inner: &Arc<RwLock<ServerEngineInner>>) -> InferenceEngine {
+    inner.read().await.engine.clone()
 }
