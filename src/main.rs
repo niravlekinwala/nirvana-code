@@ -1,4 +1,5 @@
 mod app;
+mod chat;
 pub mod attachment;
 mod cli;
 mod clipboard;
@@ -32,7 +33,6 @@ use engine::{GenerationConfig, InferenceEngine, KvQuantMode, StreamEvent};
 use model_manager::{ModelManager, MODEL_CATALOG};
 use palette::PaletteManager;
 use ratatui::{backend::CrosstermBackend, Terminal};
-use speculative::SpeculativeEngine;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -44,6 +44,7 @@ use tokio::sync::mpsc::unbounded_channel;
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    engine::set_verbose(cli.verbose);
 
     match &cli.command {
         Some(Commands::Models) => {
@@ -87,12 +88,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    let kv_mode = match cli.kv_type.to_lowercase().as_str() {
-        "q4_0" => KvQuantMode::Q4_0,
-        "f16" => KvQuantMode::F16,
-        "q8_0" => KvQuantMode::Q8_0,
-        _ => KvQuantMode::Auto,
-    };
+    let kv_mode = cli.kv_mode();
 
     let use_mlock = !cli.no_mlock;
 
@@ -117,13 +113,8 @@ async fn main() -> Result<()> {
     }
     println!();
 
-    let engine = InferenceEngine::load(
-        &model_path,
-        cli.gpu_layers,
-        use_mlock,
-        kv_mode,
-        cli.ctx_size,
-    )?;
+    let engine = load_engine(&cli, &model_path, kv_mode)?;
+    println!("   Chat format: {}", engine.chat_format_label());
 
     run_tui(
         engine,
@@ -137,6 +128,27 @@ async fn main() -> Result<()> {
         cli.seed,
     )?;
     Ok(())
+}
+
+/// Load the configured backend: MLX for MLX directories, GGUF otherwise, and
+/// GGUF + draft when `--draft-model` or `--speculative` is given.
+fn load_engine(cli: &Cli, model_path: &Path, kv_mode: KvQuantMode) -> Result<InferenceEngine> {
+    if ModelManager::is_mlx_model(model_path) || !(cli.speculative || cli.draft_model.is_some()) {
+        return InferenceEngine::load(model_path, cli.gpu_layers, !cli.no_mlock, kv_mode, cli.ctx_size);
+    }
+    let draft_path = ModelManager::resolve_model_path(cli.draft_model.as_deref())
+        .or_else(|| ModelManager::resolve_model_path(Some(Path::new("qwen-0.5b"))))
+        .context("No draft model found for speculative decoding. Run 'nirvana-code download qwen-0.5b'")?;
+    println!("   Draft model: {} (speculative decoding, K adapts 1–16)", draft_path.display());
+    InferenceEngine::load_speculative(
+        model_path,
+        &draft_path,
+        cli.gpu_layers,
+        !cli.no_mlock,
+        kv_mode,
+        cli.ctx_size,
+        cli.n_draft,
+    )
 }
 
 fn cmd_list_models() -> Result<()> {
@@ -183,12 +195,7 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize) -> Result<()> {
     let model_path = ModelManager::resolve_model_path(cli.model.as_deref())
         .context("No model found for benchmark. Run 'nirvana-code download qwen-1.5b'")?;
 
-    let kv_mode = match cli.kv_type.to_lowercase().as_str() {
-        "q4_0" => KvQuantMode::Q4_0,
-        "f16" => KvQuantMode::F16,
-        "q8_0" => KvQuantMode::Q8_0,
-        _ => KvQuantMode::Auto,
-    };
+    let kv_mode = cli.kv_mode();
 
     println!("\n⚡ Running Silicon Core Benchmark on Apple Silicon...");
     println!("   Model:       {}", model_path.display());
@@ -199,16 +206,17 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize) -> Result<()> {
     }
     println!();
 
-    let engine = InferenceEngine::load(&model_path, cli.gpu_layers, true, kv_mode, cli.ctx_size)?;
+    let engine = load_engine(cli, &model_path, kv_mode)?;
 
     let system_prompt = "You are Nirvana Code, an ultra-fast Apple Silicon coding assistant. Provide clean Rust code.";
-    let test_prompt_1 = format!(
-        "<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\nWrite a fast concurrent queue in Rust using atomic pointers.<|im_end|>\n<|im_start|>assistant\n"
-    );
-
-    let test_prompt_2 = format!(
-        "<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\nExplain how the concurrent queue prevents data races.<|im_end|>\n<|im_start|>assistant\n"
-    );
+    let test_prompt_1 = vec![
+        chat::ChatMessage::system(system_prompt),
+        chat::ChatMessage::user("Write a fast concurrent queue in Rust using atomic pointers."),
+    ];
+    let test_prompt_2 = vec![
+        chat::ChatMessage::system(system_prompt),
+        chat::ChatMessage::user("Explain how the concurrent queue prevents data races."),
+    ];
 
     let config = GenerationConfig {
         max_tokens: num_tokens,
@@ -229,7 +237,7 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize) -> Result<()> {
     let cfg1 = config.clone();
     tokio::task::spawn_blocking(move || {
         let tx_err = tx1.clone();
-        if let Err(e) = eng1.stream_generate_with_config(&test_prompt_1, &cfg1, cancel1, tx1) {
+        if let Err(e) = eng1.stream_chat(&test_prompt_1, &cfg1, cancel1, tx1) {
             let _ = tx_err.send(StreamEvent::Error(e.to_string()));
         }
     });
@@ -254,7 +262,7 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize) -> Result<()> {
     let cfg2 = config.clone();
     tokio::task::spawn_blocking(move || {
         let tx_err = tx2.clone();
-        if let Err(e) = eng2.stream_generate_with_config(&test_prompt_2, &cfg2, cancel2, tx2) {
+        if let Err(e) = eng2.stream_chat(&test_prompt_2, &cfg2, cancel2, tx2) {
             let _ = tx_err.send(StreamEvent::Error(e.to_string()));
         }
     });
@@ -295,87 +303,11 @@ async fn cmd_single_shot(cli: &Cli, prompt: &str, preset: &str) -> Result<()> {
         .find(|t| t.id == preset)
         .unwrap_or(&TEMPLATES[0]);
 
-    let full_prompt = tmpl.build_full_context(prompt);
+    let messages = tmpl.messages(prompt);
 
-    // If draft model is supplied or speculative is requested
-    if cli.speculative || cli.draft_model.is_some() {
-        let draft_path = match ModelManager::resolve_model_path(cli.draft_model.as_deref()) {
-            Some(p) => p,
-            None => {
-                ModelManager::resolve_model_path(Some(Path::new("qwen-0.5b")))
-                    .or_else(|| ModelManager::resolve_model_path(Some(Path::new("qwen-1.5b"))))
-                    .context("No draft model found for speculative decoding. Run 'nirvana-code download qwen-0.5b'")?
-            }
-        };
+    let kv_mode = cli.kv_mode();
 
-        println!("⚡ [SPECULATIVE DECODING] Dual-Engine Metal Generation");
-        println!("   Target Model: {}", model_path.display());
-        println!("   Draft Model:  {}\n", draft_path.display());
-
-        let engine = SpeculativeEngine::load(
-            &model_path,
-            &draft_path,
-            cli.gpu_layers,
-            !cli.no_mlock,
-            cli.ctx_size,
-            4,
-        )?;
-
-        let (tx, mut rx) = unbounded_channel();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let config = GenerationConfig {
-            max_tokens: cli.max_tokens,
-            temperature: cli.temperature,
-            min_p: cli.min_p,
-            top_p: cli.top_p,
-            top_k: cli.top_k,
-            use_ngram_speculative: false,
-            seed: cli.seed,
-        };
-
-        tokio::task::spawn_blocking(move || {
-            let tx_err = tx.clone();
-            if let Err(e) = engine.stream_generate(&full_prompt, &config, cancel, tx) {
-                let _ = tx_err.send(StreamEvent::Error(e.to_string()));
-            }
-        });
-
-        use std::io::Write;
-        while let Some(event) = rx.recv().await {
-            match event {
-                StreamEvent::Token(tok) => {
-                    print!("{tok}");
-                    let _ = io::stdout().flush();
-                }
-                StreamEvent::Stats {
-                    ttft_ms,
-                    tokens_per_sec,
-                    total_tokens,
-                    kv_type,
-                    ..
-                } => {
-                    println!(
-                        "\n\n[Stats: TTFT: {ttft_ms}ms | {tokens_per_sec:.1} tok/s | {total_tokens} tokens | {kv_type}]"
-                    );
-                }
-                StreamEvent::Done => break,
-                StreamEvent::Error(err) => {
-                    eprintln!("\nError: {err}");
-                    break;
-                }
-            }
-        }
-        return Ok(());
-    }
-
-    let kv_mode = match cli.kv_type.to_lowercase().as_str() {
-        "q4_0" => KvQuantMode::Q4_0,
-        "f16" => KvQuantMode::F16,
-        "q8_0" => KvQuantMode::Q8_0,
-        _ => KvQuantMode::Auto,
-    };
-
-    let engine = InferenceEngine::load(&model_path, cli.gpu_layers, !cli.no_mlock, kv_mode, cli.ctx_size)?;
+    let engine = load_engine(cli, &model_path, kv_mode)?;
 
     let (tx, mut rx) = unbounded_channel();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -391,7 +323,7 @@ async fn cmd_single_shot(cli: &Cli, prompt: &str, preset: &str) -> Result<()> {
 
     tokio::task::spawn_blocking(move || {
         let tx_err = tx.clone();
-        if let Err(e) = engine.stream_generate_with_config(&full_prompt, &config, cancel, tx) {
+        if let Err(e) = engine.stream_chat(&messages, &config, cancel, tx) {
             let _ = tx_err.send(StreamEvent::Error(e.to_string()));
         }
     });
@@ -435,20 +367,9 @@ async fn cmd_serve(cli: &Cli, port: u16, host: &str, socket: Option<&Path>) -> R
         }
     };
 
-    let kv_mode = match cli.kv_type.to_lowercase().as_str() {
-        "q4_0" => KvQuantMode::Q4_0,
-        "f16" => KvQuantMode::F16,
-        "q8_0" => KvQuantMode::Q8_0,
-        _ => KvQuantMode::Auto,
-    };
+    let kv_mode = cli.kv_mode();
 
-    let engine = InferenceEngine::load(
-        &model_path,
-        cli.gpu_layers,
-        !cli.no_mlock,
-        kv_mode,
-        cli.ctx_size,
-    )?;
+    let engine = load_engine(cli, &model_path, kv_mode)?;
 
     let model_name = model_path
         .file_name()
@@ -480,20 +401,9 @@ async fn cmd_web(cli: &Cli, port: u16, host: &str, open_browser: bool) -> Result
         }
     };
 
-    let kv_mode = match cli.kv_type.to_lowercase().as_str() {
-        "q4_0" => KvQuantMode::Q4_0,
-        "f16" => KvQuantMode::F16,
-        "q8_0" => KvQuantMode::Q8_0,
-        _ => KvQuantMode::Auto,
-    };
+    let kv_mode = cli.kv_mode();
 
-    let engine = InferenceEngine::load(
-        &model_path,
-        cli.gpu_layers,
-        !cli.no_mlock,
-        kv_mode,
-        cli.ctx_size,
-    )?;
+    let engine = load_engine(cli, &model_path, kv_mode)?;
 
     let model_name = model_path
         .file_name()

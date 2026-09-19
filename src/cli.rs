@@ -18,6 +18,17 @@ pub struct Cli {
     pub speculative: bool,
 
     #[arg(
+        long = "n-draft",
+        global = true,
+        default_value = "4",
+        help = "Initial draft length for speculative decoding (adapts 1-16 at runtime)"
+    )]
+    pub n_draft: usize,
+
+    #[arg(long = "verbose", short = 'v', global = true, help = "Keep llama.cpp diagnostics on stderr")]
+    pub verbose: bool,
+
+    #[arg(
         long = "kv-type",
         global = true,
         default_value = "f16",
@@ -197,4 +208,16 @@ pub enum Commands {
         )]
         no_open: bool,
     },
+}
+
+impl Cli {
+    pub fn kv_mode(&self) -> crate::engine::KvQuantMode {
+        use crate::engine::KvQuantMode;
+        match self.kv_type.to_lowercase().as_str() {
+            "q4_0" => KvQuantMode::Q4_0,
+            "f16" => KvQuantMode::F16,
+            "q8_0" => KvQuantMode::Q8_0,
+            _ => KvQuantMode::Auto,
+        }
+    }
 }

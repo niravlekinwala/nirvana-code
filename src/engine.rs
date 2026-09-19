@@ -14,6 +14,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::chat::{ChatMessage, ChatRenderer};
+use crate::speculative::SpeculativeEngine;
 use crate::hardware::SiliconProfile;
 use crate::mlx_engine::MlxEngine;
 use crate::model_manager::ModelManager;
@@ -246,17 +248,121 @@ impl std::ops::Deref for SharedBackend {
     }
 }
 
+static VERBOSE: AtomicBool = AtomicBool::new(false);
+
+/// Keep llama.cpp's own diagnostics on stderr (`--verbose`). Must be called
+/// before the backend is first initialised.
+pub fn set_verbose(on: bool) {
+    VERBOSE.store(on, Ordering::Relaxed);
+}
+
+pub fn verbose() -> bool {
+    VERBOSE.load(Ordering::Relaxed)
+}
+
 impl SharedBackend {
     pub fn get() -> Result<Arc<Self>> {
         if let Some(b) = BACKEND.get() {
             return Ok(b.clone());
         }
         let mut backend = LlamaBackend::init()?;
-        backend.void_logs();
+        if !verbose() {
+            backend.void_logs();
+        }
         let shared = Arc::new(SharedBackend(backend));
         let _ = BACKEND.set(shared.clone());
         Ok(shared)
     }
+}
+
+/// Decides mlock and reports whether the weights fit the GPU-wired budget.
+pub(crate) struct MemoryPlan {
+    pub model_bytes: u64,
+    pub use_mlock: bool,
+    pub mlock_disabled: bool,
+    pub wired_advice_mb: Option<u64>,
+}
+
+impl MemoryPlan {
+    pub fn for_model(model_path: &Path, want_mlock: bool) -> Self {
+        let model_bytes = std::fs::metadata(model_path).map(|m| m.len()).unwrap_or(0);
+        let hw = SiliconProfile::detect();
+        // mlock pins every page; above ~70 % of RAM that starves the OS and the
+        // KV cache, and the call itself fails noisily on macOS.
+        let too_big_to_pin = model_bytes > hw.memory_bytes / 10 * 7;
+        let use_mlock = want_mlock && !too_big_to_pin;
+        Self {
+            model_bytes,
+            use_mlock,
+            mlock_disabled: want_mlock && !use_mlock,
+            wired_advice_mb: hw.suggested_wired_limit_mb(model_bytes),
+        }
+    }
+
+    pub fn report(&self) {
+        if self.mlock_disabled {
+            eprintln!(
+                "   Memory:      mlock disabled — {:.1} GB of weights exceeds 70% of RAM",
+                self.model_bytes as f64 / (1u64 << 30) as f64
+            );
+        }
+        if let Some(mb) = self.wired_advice_mb {
+            let hw = SiliconProfile::detect();
+            eprintln!(
+                "   Memory:      weights ({:.1} GB) exceed the GPU-wired budget ({:.1} GB). To keep the whole model on the GPU run:\n                sudo sysctl iogpu.wired_limit_mb={}",
+                self.model_bytes as f64 / (1u64 << 30) as f64,
+                hw.gpu_wired_limit_bytes as f64 / (1u64 << 30) as f64,
+                mb
+            );
+        }
+    }
+}
+
+/// Load weights, letting llama.cpp's fitter pick the offload split when the
+/// caller asked for "all layers" (99+). Pinned layer counts are honoured as-is.
+pub(crate) fn load_model_fitted(
+    backend: &SharedBackend,
+    model_path: &Path,
+    n_gpu_layers: u32,
+    use_mlock: bool,
+    n_ctx: u32,
+) -> Result<LlamaModel> {
+    if n_gpu_layers >= 99 {
+        if let Some(cpath) = model_path.to_str().and_then(|s| std::ffi::CString::new(s).ok()) {
+            let mut params = Box::pin(LlamaModelParams::default().with_use_mlock(use_mlock));
+            let mut cparams = LlamaContextParams::default()
+                .with_n_ctx(NonZeroU32::new(n_ctx))
+                .with_flash_attention_policy(llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_ENABLED);
+            let n_dev = unsafe { llama_cpp_sys_2::llama_max_devices() };
+            let mut margins = vec![1usize << 30; n_dev];
+            let log_level = if verbose() {
+                llama_cpp_sys_2::GGML_LOG_LEVEL_INFO
+            } else {
+                llama_cpp_sys_2::GGML_LOG_LEVEL_ERROR
+            };
+            match params.as_mut().fit_params(&cpath, &mut cparams, &mut margins, 512, log_level) {
+                Ok(_) => {
+                    let overrides = params.tensor_buft_override_patterns();
+                    // -1 means "all layers"; anything else means the fitter cut back
+                    if params.n_gpu_layers() >= 0 || !overrides.is_empty() {
+                        eprintln!(
+                            "   Memory:      auto-fit → {} GPU layers{}",
+                            params.n_gpu_layers(),
+                            if overrides.is_empty() { String::new() } else { format!(", {} tensors on CPU", overrides.len()) }
+                        );
+                    }
+                    return Ok(LlamaModel::load_from_file(backend, model_path, &params)?);
+                }
+                Err(_) => {
+                    eprintln!("   Memory:      auto-fit found no allocation that fits; loading anyway");
+                }
+            }
+        }
+    }
+    let params = LlamaModelParams::default()
+        .with_n_gpu_layers(n_gpu_layers)
+        .with_use_mlock(use_mlock);
+    Ok(LlamaModel::load_from_file(backend, model_path, &params)?)
 }
 
 pub struct ModelEngine {
@@ -267,6 +373,7 @@ pub struct ModelEngine {
     cached_tokens: Mutex<PrefixCache>,
     backend: Arc<SharedBackend>,
     pub model: Arc<LlamaModel>,
+    chat: ChatRenderer,
     pub kv_mode: KvQuantMode,
     pub use_mlock: bool,
     pub n_gpu_layers: u32,
@@ -304,13 +411,11 @@ impl ModelEngine {
         n_ctx: u32,
     ) -> Result<Self> {
         let backend = SharedBackend::get()?;
+        let plan = MemoryPlan::for_model(model_path, use_mlock);
+        plan.report();
+        let use_mlock = plan.use_mlock;
 
-        // Apple Silicon Memory Locking (mlock) prevents virtual memory page-outs
-        let model_params = LlamaModelParams::default()
-            .with_n_gpu_layers(n_gpu_layers)
-            .with_use_mlock(use_mlock);
-
-        let model = LlamaModel::load_from_file(&backend, model_path, &model_params)?;
+        let model = load_model_fitted(&backend, model_path, n_gpu_layers, use_mlock, n_ctx)?;
         let model = Arc::new(model);
 
         // Resolve Auto KV-cache mode
@@ -320,16 +425,41 @@ impl ModelEngine {
             kv_mode
         };
 
+        let chat = ChatRenderer::detect(&model);
+
         Ok(Self {
-            backend,
-            model,
             context: Mutex::new(None),
             cached_tokens: Mutex::new(PrefixCache::default()),
+            backend,
+            model,
+            chat,
             kv_mode: resolved_kv,
             use_mlock,
             n_gpu_layers,
             n_ctx: AtomicU32::new(n_ctx),
         })
+    }
+
+    pub fn chat_format_label(&self) -> &'static str {
+        self.chat.label()
+    }
+
+    /// Render a conversation with the model's own chat template.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn format_chat(&self, messages: &[ChatMessage]) -> String {
+        self.chat.render(&self.model, messages)
+    }
+
+    pub fn stream_chat(
+        &self,
+        messages: &[ChatMessage],
+        config: &GenerationConfig,
+        cancel_token: Arc<AtomicBool>,
+        tx: UnboundedSender<StreamEvent>,
+    ) -> Result<()> {
+        let n_ctx = self.n_ctx.load(Ordering::Relaxed) as usize;
+        let prompt = self.chat.render_fitting(&self.model, messages, n_ctx, config.max_tokens);
+        self.stream_generate_with_config(&prompt, config, cancel_token, tx)
     }
 
     pub fn total_layers(&self) -> u32 {
@@ -623,6 +753,7 @@ impl ModelEngine {
 pub enum InferenceEngine {
     Gguf(Arc<ModelEngine>),
     Mlx(Arc<MlxEngine>),
+    Speculative(Arc<SpeculativeEngine>),
 }
 
 impl InferenceEngine {
@@ -634,7 +765,7 @@ impl InferenceEngine {
         ctx_size: u32,
     ) -> Result<Self> {
         if ModelManager::is_mlx_model(model_path) {
-            let mlx = MlxEngine::load(model_path)?;
+            let mlx = MlxEngine::load(model_path, ctx_size)?;
             Ok(InferenceEngine::Mlx(Arc::new(mlx)))
         } else {
             let gguf = ModelEngine::load(model_path, gpu_layers, use_mlock, kv_mode, ctx_size)?;
@@ -642,6 +773,23 @@ impl InferenceEngine {
         }
     }
 
+    /// GGUF target with a GGUF draft model for speculative decoding.
+    pub fn load_speculative(
+        model_path: &Path,
+        draft_path: &Path,
+        gpu_layers: u32,
+        use_mlock: bool,
+        kv_mode: KvQuantMode,
+        ctx_size: u32,
+        n_draft: usize,
+    ) -> Result<Self> {
+        let spec = SpeculativeEngine::load(model_path, draft_path, gpu_layers, use_mlock, kv_mode, ctx_size, n_draft)?;
+        Ok(InferenceEngine::Speculative(Arc::new(spec)))
+    }
+
+    /// Raw pre-rendered prompt. Callers that have chat turns should use
+    /// [`Self::stream_chat`] so the model's own template is applied.
+    #[allow(dead_code)]
     pub fn stream_generate_with_config(
         &self,
         prompt: &str,
@@ -652,6 +800,31 @@ impl InferenceEngine {
         match self {
             InferenceEngine::Gguf(e) => e.stream_generate_with_config(prompt, config, cancel_token, tx),
             InferenceEngine::Mlx(e) => e.stream_generate_with_config(prompt, config, cancel_token, tx),
+            InferenceEngine::Speculative(e) => e.stream_generate(prompt, config, cancel_token, tx),
+        }
+    }
+
+    /// Generate from a conversation, letting each backend render it its own way:
+    /// GGUF through the model's chat template, MLX as native chat messages.
+    pub fn stream_chat(
+        &self,
+        messages: &[ChatMessage],
+        config: &GenerationConfig,
+        cancel_token: Arc<AtomicBool>,
+        tx: UnboundedSender<StreamEvent>,
+    ) -> Result<()> {
+        match self {
+            InferenceEngine::Gguf(e) => e.stream_chat(messages, config, cancel_token, tx),
+            InferenceEngine::Mlx(e) => e.stream_chat(messages, config, cancel_token, tx),
+            InferenceEngine::Speculative(e) => e.stream_chat(messages, config, cancel_token, tx),
+        }
+    }
+
+    pub fn chat_format_label(&self) -> &'static str {
+        match self {
+            InferenceEngine::Gguf(e) => e.chat_format_label(),
+            InferenceEngine::Mlx(_) => "mlx_lm chat template",
+            InferenceEngine::Speculative(e) => e.chat_format_label(),
         }
     }
 
@@ -659,20 +832,23 @@ impl InferenceEngine {
         match self {
             InferenceEngine::Gguf(e) => e.clear_cache(),
             InferenceEngine::Mlx(e) => e.clear_cache(),
+            InferenceEngine::Speculative(e) => e.clear_cache(),
         }
     }
 
     pub fn backend_name(&self) -> &'static str {
         match self {
             InferenceEngine::Gguf(_) => "Metal GGUF",
-            InferenceEngine::Mlx(_) => "Apple MLX",
+            InferenceEngine::Mlx(_) => "Apple MLX (experimental, via mlx_lm)",
+            InferenceEngine::Speculative(_) => "Metal GGUF + draft (speculative)",
         }
     }
 
     pub fn kv_label(&self) -> String {
         match self {
             InferenceEngine::Gguf(e) => e.kv_mode.label().to_string(),
-            InferenceEngine::Mlx(_) => "Unified LPDDR5 (Apple MLX)".to_string(),
+            InferenceEngine::Mlx(_) => "MLX (managed by mlx_lm)".to_string(),
+            InferenceEngine::Speculative(e) => e.kv_mode.label().to_string(),
         }
     }
 
@@ -684,28 +860,32 @@ impl InferenceEngine {
     pub fn total_layers(&self) -> u32 {
         match self {
             InferenceEngine::Gguf(e) => e.total_layers(),
-            InferenceEngine::Mlx(_) => 32,
+            InferenceEngine::Mlx(e) => e.n_layers,
+            InferenceEngine::Speculative(e) => e.target_model.n_layer(),
         }
     }
 
     pub fn offloaded_layers(&self) -> u32 {
         match self {
             InferenceEngine::Gguf(e) => e.offloaded_layers(),
-            InferenceEngine::Mlx(_) => 32,
+            InferenceEngine::Mlx(e) => e.n_layers,
+            InferenceEngine::Speculative(e) => e.target_model.n_layer().min(e.n_gpu_layers),
         }
     }
 
     pub fn n_gpu_layers(&self) -> u32 {
         match self {
             InferenceEngine::Gguf(e) => e.n_gpu_layers,
-            InferenceEngine::Mlx(_) => 32,
+            InferenceEngine::Mlx(e) => e.n_layers,
+            InferenceEngine::Speculative(e) => e.n_gpu_layers,
         }
     }
 
     pub fn use_mlock(&self) -> bool {
         match self {
             InferenceEngine::Gguf(e) => e.use_mlock,
-            InferenceEngine::Mlx(_) => true,
+            InferenceEngine::Mlx(_) => false,
+            InferenceEngine::Speculative(e) => e.use_mlock,
         }
     }
 
@@ -713,6 +893,7 @@ impl InferenceEngine {
         match self {
             InferenceEngine::Gguf(e) => e.kv_mode,
             InferenceEngine::Mlx(_) => KvQuantMode::Auto,
+            InferenceEngine::Speculative(e) => e.kv_mode,
         }
     }
 
@@ -720,13 +901,15 @@ impl InferenceEngine {
         match self {
             InferenceEngine::Gguf(e) => e.reconfigure_context(new_n_ctx),
             InferenceEngine::Mlx(_) => Ok(()),
+            InferenceEngine::Speculative(e) => e.reconfigure_context(new_n_ctx),
         }
     }
 
     pub fn n_ctx(&self) -> u32 {
         match self {
             InferenceEngine::Gguf(e) => e.n_ctx.load(Ordering::Relaxed),
-            InferenceEngine::Mlx(_) => 32768,
+            InferenceEngine::Mlx(e) => e.n_ctx,
+            InferenceEngine::Speculative(e) => e.n_ctx.load(Ordering::Relaxed),
         }
     }
 }

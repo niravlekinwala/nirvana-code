@@ -19,6 +19,7 @@ use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 
 use crate::attachment::Attachment;
+use crate::chat::ChatMessage;
 use crate::engine::{GenerationConfig, InferenceEngine, KvQuantMode, StreamEvent};
 use crate::model_manager::ModelManager;
 
@@ -155,6 +156,7 @@ pub struct ContextInfoResponse {
     pub model: String,
     pub backend: String,
     pub kv_mode: String,
+    pub chat_format: String,
     pub p_cores: u32,
     pub gpu_layers: u32,
     pub mlock: bool,
@@ -518,6 +520,7 @@ async fn handle_get_context(State(state): State<ServerState>) -> Json<ContextInf
     let model = inner.model_name.clone();
     let backend = inner.engine.backend_name().to_string();
     let kv_mode = inner.engine.kv_label();
+    let chat_format = inner.engine.chat_format_label().to_string();
     let p_cores = crate::hardware::SiliconProfile::detect().p_cores;
     let gpu_layers = state.gpu_layers;
     let mlock = state.use_mlock;
@@ -528,6 +531,7 @@ async fn handle_get_context(State(state): State<ServerState>) -> Json<ContextInf
         model,
         backend,
         kv_mode,
+        chat_format,
         p_cores,
         gpu_layers,
         mlock,
@@ -846,72 +850,57 @@ async fn handle_project_file(
     .into_response()
 }
 
-fn format_messages_to_prompt(
+fn build_chat_messages(
     messages: &[ChatMessageDto],
     attachment: Option<&AttachmentPayloadDto>,
-) -> String {
-    let mut prompt = String::new();
-    let mut has_system = false;
+) -> Vec<ChatMessage> {
+    let mut out = Vec::with_capacity(messages.len() + 1);
 
-    for msg in messages {
-        if msg.role.to_lowercase() == "system" {
-            prompt.push_str(&format!("<|im_start|>system\n{}<|im_end|>\n", msg.content));
-            has_system = true;
-        }
-    }
-
+    let has_system = messages.iter().any(|m| m.role.eq_ignore_ascii_case("system"));
     if !has_system {
-        prompt.push_str("<|im_start|>system\nYou are Nirvana Code, an ultra-low latency Apple Silicon coding assistant. Provide clean, fast, reliable code.<|im_end|>\n");
+        out.push(ChatMessage::system(
+            "You are Nirvana Code, an ultra-low latency Apple Silicon coding assistant. Provide clean, fast, reliable code.",
+        ));
     }
 
-    let non_sys: Vec<&ChatMessageDto> = messages
+    let last_user_idx = messages
         .iter()
-        .filter(|m| m.role.to_lowercase() != "system")
-        .collect();
-    let count = non_sys.len();
+        .rposition(|m| m.role.eq_ignore_ascii_case("user"));
 
-    for (i, msg) in non_sys.into_iter().enumerate() {
-        if i + 1 == count && msg.role.to_lowercase() == "user" && attachment.is_some() {
-            let att = attachment.unwrap();
-            let mut formatted_content = String::new();
-            formatted_content.push_str(&format!(
-                "[ATTACHED FILE: {} | Type: {} | {}]\n",
-                att.filename,
-                att.file_type.as_deref().unwrap_or("FILE"),
-                att.metadata_summary.as_deref().unwrap_or("")
-            ));
-            if let Some(ref text) = att.extracted_text {
-                formatted_content.push_str("--- BEGIN ATTACHED CONTENT ---\n");
-                formatted_content.push_str(text);
-                if !text.ends_with('\n') {
-                    formatted_content.push('\n');
+    for (i, msg) in messages.iter().enumerate() {
+        let role = msg.role.to_lowercase();
+        let content = match (attachment, last_user_idx) {
+            (Some(att), Some(idx)) if i == idx => {
+                let mut c = format!(
+                    "[ATTACHED FILE: {} | Type: {} | {}]\n",
+                    att.filename,
+                    att.file_type.as_deref().unwrap_or("FILE"),
+                    att.metadata_summary.as_deref().unwrap_or("")
+                );
+                if let Some(ref text) = att.extracted_text {
+                    c.push_str("--- BEGIN ATTACHED CONTENT ---\n");
+                    c.push_str(text);
+                    if !text.ends_with('\n') {
+                        c.push('\n');
+                    }
+                    c.push_str("--- END ATTACHED CONTENT ---\n\n");
                 }
-                formatted_content.push_str("--- END ATTACHED CONTENT ---\n\n");
+                if msg.content.trim().is_empty() {
+                    c.push_str(&format!(
+                        "Please analyze the attached {} (`{}`) and provide a detailed explanation of its contents and key insights.",
+                        att.file_type.as_deref().unwrap_or("file").to_lowercase(),
+                        att.filename
+                    ));
+                } else {
+                    c.push_str(&msg.content);
+                }
+                c
             }
-            if msg.content.trim().is_empty() {
-                formatted_content.push_str(&format!(
-                    "Please analyze the attached {} (`{}`) and provide a detailed explanation of its contents and key insights.",
-                    att.file_type.as_deref().unwrap_or("file").to_lowercase(),
-                    att.filename
-                ));
-            } else {
-                formatted_content.push_str(&msg.content);
-            }
-
-            prompt.push_str(&format!(
-                "<|im_start|>{}\n{}<|im_end|>\n",
-                msg.role, formatted_content
-            ));
-        } else {
-            prompt.push_str(&format!(
-                "<|im_start|>{}\n{}<|im_end|>\n",
-                msg.role, msg.content
-            ));
-        }
+            _ => msg.content.clone(),
+        };
+        out.push(ChatMessage::new(role, content));
     }
-
-    prompt.push_str("<|im_start|>assistant\n");
-    prompt
+    out
 }
 
 async fn handle_chat_completions(
@@ -994,7 +983,7 @@ async fn handle_chat_completions(
         }
     }
 
-    let prompt = format_messages_to_prompt(&payload.messages, attachment.as_ref());
+    let messages = build_chat_messages(&payload.messages, attachment.as_ref());
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -1020,13 +1009,12 @@ async fn handle_chat_completions(
         *active = Some(cancel.clone());
     }
 
-    let prompt_clone = prompt.clone();
     let cancel_clone = cancel.clone();
     let engine_clone = engine.clone();
 
     tokio::task::spawn_blocking(move || {
         let tx_err = tx.clone();
-        if let Err(e) = engine_clone.stream_generate_with_config(&prompt_clone, &config, cancel_clone, tx) {
+        if let Err(e) = engine_clone.stream_chat(&messages, &config, cancel_clone, tx) {
             let _ = tx_err.send(StreamEvent::Error(e.to_string()));
         }
     });

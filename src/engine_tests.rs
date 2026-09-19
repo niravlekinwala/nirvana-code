@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
+use crate::chat::{render_chatml, ChatMessage};
 use crate::engine::{GenerationConfig, KvQuantMode, ModelEngine, StreamEvent};
 use crate::speculative::SpeculativeEngine;
 
@@ -156,7 +157,7 @@ fn draft_speculative_matches_plain_greedy() {
     let Some(path) = model_path() else { return };
     let draft = draft_path(&path);
     let plain_engine = load_gguf(&path);
-    let spec_engine = SpeculativeEngine::load(&path, &draft, 99, false, N_CTX, 4).expect("spec load");
+    let spec_engine = SpeculativeEngine::load(&path, &draft, 99, false, KvQuantMode::F16, N_CTX, 4).expect("spec load");
     let p = prompt(REPETITIVE);
     let cfg = greedy(96, false);
 
@@ -186,3 +187,20 @@ fn draft_speculative_matches_plain_greedy() {
     assert!(again.prefix_reused > 0);
     assert_eq!(again.text, spec.text);
 }
+
+#[test]
+#[ignore]
+fn chat_template_comes_from_model_metadata() {
+    let Some(path) = model_path() else { return };
+    let engine = load_gguf(&path);
+    let msgs = [ChatMessage::system("S"), ChatMessage::user("U"), ChatMessage::assistant("A"), ChatMessage::user("U2")];
+    let rendered = engine.format_chat(&msgs);
+    assert!(rendered.ends_with("assistant\n") || rendered.ends_with("assistant\n\n") || rendered.contains("U2"),
+        "rendered prompt should end with an open assistant turn: {rendered:?}");
+    // The Qwen family ships a ChatML template; llama.cpp renders it identically
+    // to our fallback. Other families will differ, which is the point.
+    if engine.chat_format_label().starts_with("model template") && rendered.contains("<|im_start|>") {
+        assert_eq!(rendered, render_chatml(&msgs));
+    }
+}
+
