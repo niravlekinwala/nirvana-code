@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use llama_cpp_2::context::params::LlamaContextParams;
+use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
@@ -8,21 +9,49 @@ use llama_cpp_2::token::LlamaToken;
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::engine::{ModelEngine, StreamEvent};
+use crate::engine::{
+    boost_thread_qos, build_sampler, GenerationConfig, KvQuantMode, ModelEngine, PrefixCache,
+    SharedBackend, StreamEvent,
+};
+use crate::hardware::SiliconProfile;
 
+/// llama.cpp tolerates small vocab-size differences between draft and target
+/// (padding rows); anything larger means the models do not share a tokenizer.
+const MAX_VOCAB_SIZE_DIFF: i32 = 128;
+
+/// Persistent context plus the mirror of what is in its KV cache.
+struct ModelSlot {
+    ctx: Option<LlamaContext<'static>>,
+    cache: PrefixCache,
+}
+
+/// Two-model speculative decoding: a small draft model proposes `n_draft`
+/// tokens greedily, the target verifies them in one batched forward pass.
+///
+/// Both contexts persist across calls so multi-turn chats reuse the prefix
+/// exactly like `ModelEngine`.
 pub struct SpeculativeEngine {
-    backend: Arc<crate::engine::SharedBackend>,
+    // Declared before the models: contexts borrow them (see the transmute in
+    // `ensure_context`) and Rust drops fields in declaration order.
+    target: Mutex<ModelSlot>,
+    draft: Mutex<ModelSlot>,
+    backend: Arc<SharedBackend>,
     pub target_model: Arc<LlamaModel>,
     pub draft_model: Arc<LlamaModel>,
     #[allow(dead_code)]
     pub n_gpu_layers: u32,
+    pub use_mlock: bool,
+    pub kv_mode: KvQuantMode,
     pub n_ctx: u32,
     pub n_draft: usize,
 }
+
+unsafe impl Send for SpeculativeEngine {}
+unsafe impl Sync for SpeculativeEngine {}
 
 impl SpeculativeEngine {
     pub fn load(
@@ -33,7 +62,7 @@ impl SpeculativeEngine {
         n_ctx: u32,
         n_draft: usize,
     ) -> Result<Self> {
-        let backend = crate::engine::SharedBackend::get()?;
+        let backend = SharedBackend::get()?;
 
         let model_params = LlamaModelParams::default()
             .with_n_gpu_layers(n_gpu_layers)
@@ -41,266 +70,275 @@ impl SpeculativeEngine {
 
         let target_model = LlamaModel::load_from_file(&backend, target_path, &model_params)?;
         let draft_model = LlamaModel::load_from_file(&backend, draft_path, &model_params)?;
+        Self::check_vocab_compat(&target_model, &draft_model)?;
+
+        let kv_mode = ModelEngine::resolve_auto_kv(&target_model);
 
         Ok(Self {
+            target: Mutex::new(ModelSlot { ctx: None, cache: PrefixCache::default() }),
+            draft: Mutex::new(ModelSlot { ctx: None, cache: PrefixCache::default() }),
             backend,
             target_model: Arc::new(target_model),
             draft_model: Arc::new(draft_model),
             n_gpu_layers,
+            use_mlock,
+            kv_mode,
             n_ctx,
-            n_draft,
+            n_draft: n_draft.max(1),
         })
+    }
+
+    /// The draft's token ids are fed straight into the target, so the two
+    /// vocabularies must agree. Mirrors the check in llama.cpp's `common/speculative`.
+    fn check_vocab_compat(target: &LlamaModel, draft: &LlamaModel) -> Result<()> {
+        let (nt, nd) = (target.n_vocab(), draft.n_vocab());
+        if (nt - nd).abs() > MAX_VOCAB_SIZE_DIFF {
+            bail!(
+                "Draft model vocab ({nd}) does not match target vocab ({nt}); speculative decoding needs models that share a tokenizer"
+            );
+        }
+        if target.token_bos() != draft.token_bos() || target.token_eos() != draft.token_eos() {
+            bail!("Draft and target models use different BOS/EOS tokens; they do not share a tokenizer");
+        }
+        // Spot-check token text across the shared range
+        let n = nt.min(nd);
+        for id in (5..n).step_by(997) {
+            let tok = LlamaToken(id);
+            let a = target.token_to_piece_bytes(tok, 64, true, None).ok();
+            let b = draft.token_to_piece_bytes(tok, 64, true, None).ok();
+            if a != b {
+                bail!("Draft and target tokenizers disagree on token {id}; speculative decoding needs a matching vocabulary");
+            }
+        }
+        Ok(())
+    }
+
+    /// Explicitly clear both prefix caches
+    #[allow(dead_code)]
+    pub fn clear_cache(&self) {
+        for slot in [&self.target, &self.draft] {
+            if let Ok(mut s) = slot.lock() {
+                if let Some(ctx) = s.ctx.as_mut() {
+                    ctx.clear_kv_cache();
+                }
+                s.cache.tokens.clear();
+            }
+        }
+    }
+
+    fn context_params(&self, n_batch: u32, n_ubatch: u32) -> LlamaContextParams {
+        let p_cores = SiliconProfile::detect().p_cores.max(1) as i32;
+        LlamaContextParams::default()
+            .with_n_ctx(Some(NonZeroU32::new(self.n_ctx).unwrap()))
+            .with_n_threads(p_cores)
+            .with_n_threads_batch(p_cores)
+            .with_n_batch(n_batch)
+            .with_n_ubatch(n_ubatch)
+            .with_flash_attention_policy(llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_ENABLED)
+            .with_type_k(self.kv_mode.to_llama_type())
+            .with_type_v(self.kv_mode.to_llama_type())
+    }
+
+    fn ensure_context(
+        &self,
+        slot: &mut ModelSlot,
+        model: &Arc<LlamaModel>,
+        n_batch: u32,
+        n_ubatch: u32,
+    ) -> Result<()> {
+        if slot.ctx.is_none() {
+            let ctx = model.new_context(&self.backend, self.context_params(n_batch, n_ubatch))?;
+            // Safety: the model is held in an Arc on `self`, which outlives the
+            // context because the slot fields are dropped first.
+            let static_ctx: LlamaContext<'static> = unsafe { std::mem::transmute(ctx) };
+            slot.ctx = Some(static_ctx);
+        }
+        Ok(())
     }
 
     pub fn stream_generate(
         &self,
         prompt: &str,
-        max_tokens: usize,
-        temperature: f32,
+        config: &GenerationConfig,
         cancel_token: Arc<AtomicBool>,
         tx: UnboundedSender<StreamEvent>,
     ) -> Result<()> {
         let start_time = Instant::now();
+        boost_thread_qos();
 
-        let kv_type = ModelEngine::resolve_auto_kv(&self.target_model).to_llama_type();
+        // 1. Tokenize once with the target; the draft shares the vocabulary
+        let prompt_tokens = match self.target_model.str_to_token(prompt, AddBos::Always) {
+            Ok(tokens) => tokens,
+            Err(e) => {
+                let _ = tx.send(StreamEvent::Error(format!("Tokenization failed: {e}")));
+                bail!("Tokenization failed");
+            }
+        };
+        let n_prompt = prompt_tokens.len();
+        if n_prompt == 0 {
+            let _ = tx.send(StreamEvent::Done);
+            return Ok(());
+        }
+        let n_ctx = self.n_ctx as usize;
+        // Room for the pending token plus a full draft on every round
+        let reserve = self.n_draft + 2;
+        if n_prompt + reserve >= n_ctx {
+            let _ = tx.send(StreamEvent::Error(format!(
+                "Prompt ({n_prompt} tokens) does not fit in the {n_ctx}-token context"
+            )));
+            bail!("Prompt exceeds context");
+        }
 
         let n_batch = 2048.min(self.n_ctx);
         let n_ubatch = 512.min(n_batch);
         let batch_size = (n_batch as usize).min(512);
 
-        // 1. Context params with Metal Flash Attention & Auto KV
-        let make_params = || {
-            LlamaContextParams::default()
-                .with_n_ctx(Some(NonZeroU32::new(self.n_ctx).unwrap()))
-                .with_n_threads(4)
-                .with_n_threads_batch(8)
-                .with_n_batch(n_batch)
-                .with_n_ubatch(n_ubatch)
-                .with_flash_attention_policy(llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_AUTO)
-                .with_type_k(kv_type)
-                .with_type_v(kv_type)
-        };
+        // 2. Persistent contexts and prefix caches for both models
+        let mut target = self.target.lock().unwrap();
+        let mut draft = self.draft.lock().unwrap();
+        self.ensure_context(&mut target, &self.target_model, n_batch, n_ubatch)?;
+        self.ensure_context(&mut draft, &self.draft_model, n_batch, n_ubatch)?;
+        let ModelSlot { ctx: t_ctx, cache: t_cache } = &mut *target;
+        let ModelSlot { ctx: d_ctx, cache: d_cache } = &mut *draft;
+        let t_ctx = t_ctx.as_mut().unwrap();
+        let d_ctx = d_ctx.as_mut().unwrap();
 
-        let mut target_ctx = self.target_model.new_context(&self.backend, make_params())?;
-        let mut draft_ctx = self.draft_model.new_context(&self.backend, make_params())?;
+        let mut t_batch = LlamaBatch::new(batch_size.max(self.n_draft + 1), 1);
+        let mut d_batch = LlamaBatch::new(batch_size, 1);
 
-        // 2. Tokenize prompt for target and draft
-        let target_tokens = match self.target_model.str_to_token(prompt, AddBos::Always) {
-            Ok(tokens) => tokens,
-            Err(e) => {
-                let _ = tx.send(StreamEvent::Error(format!("Target tokenization failed: {e}")));
-                bail!("Tokenization failed");
-            }
-        };
-
-        let draft_tokens = match self.draft_model.str_to_token(prompt, AddBos::Always) {
-            Ok(tokens) => tokens,
-            Err(e) => {
-                let _ = tx.send(StreamEvent::Error(format!("Draft tokenization failed: {e}")));
-                bail!("Draft tokenization failed");
-            }
-        };
-
-        let n_prompt = target_tokens.len();
-        if n_prompt == 0 {
+        let prefix_tokens_reused = t_cache.sync(t_ctx, &prompt_tokens);
+        if !t_cache.prefill(t_ctx, &mut t_batch, &prompt_tokens[prefix_tokens_reused..], batch_size, &cancel_token)? {
+            let _ = tx.send(StreamEvent::Done);
+            return Ok(());
+        }
+        let d_reused = d_cache.sync(d_ctx, &prompt_tokens);
+        if !d_cache.prefill(d_ctx, &mut d_batch, &prompt_tokens[d_reused..], batch_size, &cancel_token)? {
             let _ = tx.send(StreamEvent::Done);
             return Ok(());
         }
 
-        // Prefill Target Context
-        let mut target_batch = LlamaBatch::new(batch_size, 1);
-        let mut target_pos = 0;
-        for chunk in target_tokens.chunks(batch_size) {
-            if cancel_token.load(Ordering::Relaxed) {
-                let _ = tx.send(StreamEvent::Done);
-                return Ok(());
-            }
-            target_batch.clear();
-            let chunk_len = chunk.len();
-            for (i, &token) in chunk.iter().enumerate() {
-                let is_last = (target_pos + i + 1) == n_prompt;
-                target_batch.add(token, (target_pos + i) as i32, &[0], is_last)?;
-            }
-            target_pos += chunk_len;
-            target_ctx.decode(&mut target_batch)?;
-        }
-
-        // Prefill Draft Context
-        let mut draft_batch = LlamaBatch::new(batch_size, 1);
-        let mut draft_pos = 0;
-        for chunk in draft_tokens.chunks(batch_size) {
-            if cancel_token.load(Ordering::Relaxed) {
-                let _ = tx.send(StreamEvent::Done);
-                return Ok(());
-            }
-            draft_batch.clear();
-            let chunk_len = chunk.len();
-            for (i, &token) in chunk.iter().enumerate() {
-                let is_last = (draft_pos + i + 1) == draft_tokens.len();
-                draft_batch.add(token, (draft_pos + i) as i32, &[0], is_last)?;
-            }
-            draft_pos += chunk_len;
-            draft_ctx.decode(&mut draft_batch)?;
-        }
-
-        let mut target_sampler = if temperature <= 0.05 {
-            LlamaSampler::greedy()
-        } else {
-            LlamaSampler::chain_simple([
-                LlamaSampler::min_p(0.05, 1),
-                LlamaSampler::top_k(40),
-                LlamaSampler::top_p(0.9, 1),
-                LlamaSampler::temp(temperature),
-                LlamaSampler::dist(42),
-            ])
-        };
-
+        // 3. Samplers: the draft is always greedy — its job is to guess what the
+        //    target will pick, and the target's own sampler makes the real choice.
+        let mut target_sampler = build_sampler(config);
         let mut draft_sampler = LlamaSampler::greedy();
         let mut decoder = encoding_rs::UTF_8.new_decoder();
-        let mut first_token_time: Option<Instant> = None;
-        let mut total_generated = 0;
-        let mut draft_tokens_proposed = 0;
-        let mut draft_tokens_accepted = 0;
 
-        // Speculative generation loop
-        while total_generated < max_tokens {
+        let mut total_generated = 0usize;
+        let mut drafted = 0usize;
+        let mut accepted = 0usize;
+
+        let mut emit = |tok: LlamaToken, total: &mut usize| {
+            *total += 1;
+            if let Ok(piece) = self.target_model.token_to_piece(tok, &mut decoder, false, None) {
+                if !piece.is_empty() {
+                    let _ = tx.send(StreamEvent::Token(piece));
+                }
+            }
+        };
+
+        // `pending` is the target's latest sample: emitted, not yet in either KV.
+        let mut pending = target_sampler.sample(t_ctx, -1);
+        if self.target_model.is_eog_token(pending) {
+            let _ = tx.send(StreamEvent::Done);
+            return Ok(());
+        }
+        let first_token_time = Instant::now();
+        emit(pending, &mut total_generated);
+
+        // 4. Speculative loop
+        while total_generated < config.max_tokens {
             if cancel_token.load(Ordering::Relaxed) {
                 break;
             }
+            let n_past = t_cache.tokens.len();
+            if n_past + reserve >= n_ctx {
+                // Context is full; no context shifting in speculative mode
+                break;
+            }
 
-            // 1. Draft generates K candidate tokens
-            let mut candidates: Vec<LlamaToken> = Vec::with_capacity(self.n_draft);
-            for _ in 0..self.n_draft {
-                let d_tok = draft_sampler.sample(&draft_ctx, draft_batch.n_tokens() - 1);
-                draft_sampler.accept(d_tok);
+            // a. Bring the draft in line with target KV + pending. After a
+            //    rejection this rolls back the mis-drafted tail; in all cases at
+            //    least `pending` is decoded so the draft's logits are fresh.
+            let mut want = Vec::with_capacity(n_past + 1);
+            want.extend_from_slice(&t_cache.tokens);
+            want.push(pending);
+            let d_common = d_cache.sync(d_ctx, &want);
+            if !d_cache.prefill(d_ctx, &mut d_batch, &want[d_common..], batch_size, &cancel_token)? {
+                break;
+            }
 
+            // b. Draft up to n_draft tokens greedily
+            let mut cands: Vec<LlamaToken> = Vec::with_capacity(self.n_draft);
+            while cands.len() < self.n_draft {
+                let d_tok = draft_sampler.sample(d_ctx, -1);
                 if self.draft_model.is_eog_token(d_tok) {
                     break;
                 }
-                candidates.push(d_tok);
-
-                draft_batch.clear();
-                draft_batch.add(d_tok, draft_pos as i32, &[0], true)?;
-                draft_pos += 1;
-                draft_ctx.decode(&mut draft_batch)?;
-            }
-
-            draft_tokens_proposed += candidates.len();
-
-            // 2. If no candidates generated, sample 1 token directly from target
-            if candidates.is_empty() {
-                let tok = target_sampler.sample(&target_ctx, target_batch.n_tokens() - 1);
-                target_sampler.accept(tok);
-                if self.target_model.is_eog_token(tok) {
+                cands.push(d_tok);
+                if cands.len() == self.n_draft {
                     break;
                 }
-                if first_token_time.is_none() {
-                    first_token_time = Some(Instant::now());
-                }
-                total_generated += 1;
-                if let Ok(piece) = self.target_model.token_to_piece(tok, &mut decoder, false, None) {
-                    if !piece.is_empty() {
-                        let _ = tx.send(StreamEvent::Token(piece));
-                    }
-                }
-                target_batch.clear();
-                target_batch.add(tok, target_pos as i32, &[0], true)?;
-                target_pos += 1;
-                target_ctx.decode(&mut target_batch)?;
-                continue;
+                d_batch.clear();
+                d_batch.add(d_tok, d_cache.tokens.len() as i32, &[0], true)?;
+                d_ctx.decode(&mut d_batch)?;
+                d_cache.tokens.push(d_tok);
             }
+            drafted += cands.len();
 
-            // 3. Evaluate all candidate tokens in one single batched target forward pass
-            target_batch.clear();
-            for (i, &cand) in candidates.iter().enumerate() {
-                target_batch.add(cand, (target_pos + i) as i32, &[0], true)?;
+            // c. One target pass over [pending, cands...]. Logits at index i
+            //    predict the token after batch[i], i.e. they verify cands[i].
+            t_batch.clear();
+            t_batch.add(pending, n_past as i32, &[0], true)?;
+            for (k, &cand) in cands.iter().enumerate() {
+                t_batch.add(cand, (n_past + 1 + k) as i32, &[0], true)?;
             }
-            target_ctx.decode(&mut target_batch)?;
+            t_ctx.decode(&mut t_batch)?;
+            t_cache.tokens.push(pending);
 
-            // 4. Verification pass
-            let mut accepted_count = 0;
-            let mut stopped = false;
-
-            for (i, &cand) in candidates.iter().enumerate() {
-                let target_sampled = target_sampler.sample(&target_ctx, i as i32);
-                target_sampler.accept(target_sampled);
-
-                if first_token_time.is_none() {
-                    first_token_time = Some(Instant::now());
+            // d. Verify left to right; the first disagreement (or the sample
+            //    after the last accepted draft) becomes the new pending token.
+            let mut finished = false;
+            let mut next = pending;
+            for i in 0..=cands.len() {
+                next = target_sampler.sample(t_ctx, i as i32);
+                if self.target_model.is_eog_token(next) {
+                    finished = true;
+                    break;
                 }
-
-                if target_sampled == cand {
-                    // Candidate accepted!
-                    accepted_count += 1;
-                    draft_tokens_accepted += 1;
-                    total_generated += 1;
-
-                    if let Ok(piece) = self.target_model.token_to_piece(cand, &mut decoder, false, None) {
-                        if !piece.is_empty() {
-                            let _ = tx.send(StreamEvent::Token(piece));
-                        }
-                    }
-
-                    if self.target_model.is_eog_token(cand) {
-                        stopped = true;
+                if i < cands.len() && next == cands[i] {
+                    t_cache.tokens.push(cands[i]);
+                    accepted += 1;
+                    emit(cands[i], &mut total_generated);
+                    if total_generated >= config.max_tokens {
+                        finished = true;
                         break;
                     }
                 } else {
-                    // Mismatch: candidate rejected, accept target's token instead
-                    total_generated += 1;
-                    if let Ok(piece) = self.target_model.token_to_piece(target_sampled, &mut decoder, false, None) {
-                        if !piece.is_empty() {
-                            let _ = tx.send(StreamEvent::Token(piece));
-                        }
-                    }
-
-                    // Rollback target context to position after accepted + target token
-                    let valid_target_pos = target_pos + accepted_count + 1;
-                    let _ = target_ctx.kv_cache_seq_rm(0, Some(valid_target_pos as u32), None);
-                    target_pos = valid_target_pos;
-
-                    // Rollback draft context to match target position
-                    let _ = draft_ctx.kv_cache_seq_rm(0, Some(valid_target_pos as u32), None);
-                    draft_pos = valid_target_pos;
-
-                    // Feed the target token into draft model
-                    draft_batch.clear();
-                    draft_batch.add(target_sampled, (valid_target_pos - 1) as i32, &[0], true)?;
-                    draft_ctx.decode(&mut draft_batch)?;
-
-                    if self.target_model.is_eog_token(target_sampled) {
-                        stopped = true;
-                    }
                     break;
                 }
             }
 
-            if stopped {
+            // Evict rejected draft tokens from the target KV
+            let keep = t_cache.tokens.len();
+            t_cache.rollback(t_ctx, keep);
+            if finished {
                 break;
             }
 
-            if accepted_count == candidates.len() {
-                target_pos += candidates.len();
-            }
+            pending = next;
+            emit(pending, &mut total_generated);
         }
 
-        let elapsed = start_time.elapsed();
-        let ttft_ms = first_token_time
-            .map(|t| t.duration_since(start_time).as_millis())
-            .unwrap_or(elapsed.as_millis());
-
-        let decode_secs = first_token_time
-            .map(|t| t.elapsed().as_secs_f64())
-            .unwrap_or(0.001);
-
+        // 5. Stats
+        let ttft_ms = first_token_time.duration_since(start_time).as_millis();
+        let decode_secs = first_token_time.elapsed().as_secs_f64();
         let tps = if total_generated > 1 && decode_secs > 0.0 {
             (total_generated - 1) as f64 / decode_secs
         } else {
             0.0
         };
-
-        let acceptance_rate = if draft_tokens_proposed > 0 {
-            (draft_tokens_accepted as f64 / draft_tokens_proposed as f64) * 100.0
+        let acceptance = if drafted > 0 {
+            accepted as f64 / drafted as f64 * 100.0
         } else {
             0.0
         };
@@ -309,15 +347,19 @@ impl SpeculativeEngine {
             ttft_ms,
             tokens_per_sec: tps,
             total_tokens: total_generated,
-            prompt_tokens: 256,
-            context_used: total_generated + 256,
+            prompt_tokens: n_prompt,
+            context_used: t_cache.tokens.len(),
             context_capacity: self.n_ctx,
-            prefix_tokens_reused: draft_tokens_accepted,
-            prefix_cache_hit: true,
-            kv_type: format!("Speculative (Acc: {acceptance_rate:.1}%)"),
-            mlock_active: true,
+            prefix_tokens_reused,
+            prefix_cache_hit: prefix_tokens_reused > 0,
+            kv_type: format!(
+                "{} · Speculative K={} (acc {:.0}%)",
+                self.kv_mode.label(),
+                self.n_draft,
+                acceptance
+            ),
+            mlock_active: self.use_mlock,
         });
-
         let _ = tx.send(StreamEvent::Done);
         Ok(())
     }

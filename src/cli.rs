@@ -92,6 +92,13 @@ pub struct Cli {
     pub top_k: i32,
 
     #[arg(
+        long = "seed",
+        global = true,
+        help = "Sampler RNG seed for reproducible output (random per generation if unset)"
+    )]
+    pub seed: Option<u32>,
+
+    #[arg(
         long = "ngram-speculative",
         global = true,
         help = "Enable prompt lookup decoding (self-speculative n-gram matching) for 1.5x-2x code speedup"

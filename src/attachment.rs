@@ -508,8 +508,8 @@ mod tests {
         // "fn main() { println!(\"from base64\"); }" base64 encoded with newlines/spaces
         let raw = "fn main() { println!(\"from base64\"); }";
         let b64 = BASE64_STANDARD.encode(raw);
-        let b64_with_newlines = format!("  \n{} \r\n", b64);
-        let data_url = format!("data:text/plain;base64,{}", b64_with_newlines);
+        let b64_with_newlines = format!("  \n{b64} \r\n");
+        let data_url = format!("data:text/plain;base64,{b64_with_newlines}");
 
         let att = Attachment::from_base64("sample.rs", &data_url).unwrap();
         assert_eq!(att.filename, "sample.rs");

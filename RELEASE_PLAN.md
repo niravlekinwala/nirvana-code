@@ -56,14 +56,23 @@ Smaller items found alongside:
 
 ## 4. The plan
 
-### Phase 0 — Hygiene (≈1 day)
+### Phase 0 — Hygiene (≈1 day) — ✅ done (`50090e1`)
 
 - Commit the ~2k lines of uncommitted work on a branch. Add `.cargo/config.toml` to the repo deliberately (see Phase 3, item 8, on `target-cpu=native`).
 - `cargo clippy --fix`; `src/cli.rs:8` version → `env!("CARGO_PKG_VERSION")`.
 - Add LICENSE, CHANGELOG, CONTRIBUTING.
 - GitHub Actions on a `macos-14` (arm64) runner: build, `clippy -D warnings`, test, and a HEAD-check of every `MODEL_CATALOG` URL.
 
-### Phase 1 — Correctness (≈3–5 days)
+### Phase 1 — Correctness (≈3–5 days) — 🟡 in progress
+
+Done: bugs 1, 2, 3, 4, 5, 6, 9 (speculative rewrite, shared `PrefixCache`,
+seed, field order, honest stats), plus the engine tests. Remaining: 7 (chat
+templates), 8 (hardware probe rewrite — detection is now memoised but still
+string-matched), prompt truncation on turn boundaries, `--verbose` logging.
+
+Measured on M2 Pro / Qwen2.5-Coder-1.5B / 0.5B draft, temp 0: plain 116 tok/s,
+speculative K=4 81 tok/s at 66 % acceptance. A 1.5B target is too fast for a
+draft to pay off; the win is expected on 7B–27B targets (Phase 3 §1).
 
 Fix bugs 1–9 above. Concretely:
 

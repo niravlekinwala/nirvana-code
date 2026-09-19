@@ -95,6 +95,8 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub ngram_speculative: bool,
     #[serde(default)]
+    pub seed: Option<u32>,
+    #[serde(default)]
     pub attachment: Option<AttachmentPayloadDto>,
 }
 
@@ -1006,6 +1008,7 @@ async fn handle_chat_completions(
         top_p: payload.top_p,
         top_k: payload.top_k,
         use_ngram_speculative: payload.ngram_speculative,
+        seed: payload.seed,
     };
 
     let (tx, mut rx) = unbounded_channel();
@@ -1022,7 +1025,10 @@ async fn handle_chat_completions(
     let engine_clone = engine.clone();
 
     tokio::task::spawn_blocking(move || {
-        let _ = engine_clone.stream_generate_with_config(&prompt_clone, &config, cancel_clone, tx);
+        let tx_err = tx.clone();
+        if let Err(e) = engine_clone.stream_generate_with_config(&prompt_clone, &config, cancel_clone, tx) {
+            let _ = tx_err.send(StreamEvent::Error(e.to_string()));
+        }
     });
 
     if payload.stream {

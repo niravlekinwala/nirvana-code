@@ -3,6 +3,8 @@ pub mod attachment;
 mod cli;
 mod clipboard;
 mod engine;
+#[cfg(test)]
+mod engine_tests;
 mod hardware;
 pub mod mlx_engine;
 mod model_manager;
@@ -132,6 +134,7 @@ async fn main() -> Result<()> {
         cli.top_p,
         cli.top_k,
         cli.ngram_speculative,
+        cli.seed,
     )?;
     Ok(())
 }
@@ -214,6 +217,7 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize) -> Result<()> {
         top_p: cli.top_p,
         top_k: cli.top_k,
         use_ngram_speculative: cli.ngram_speculative,
+        seed: cli.seed,
     };
 
     // Turn 1: Cold Cache Prefill
@@ -224,7 +228,10 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize) -> Result<()> {
     let eng1 = engine.clone();
     let cfg1 = config.clone();
     tokio::task::spawn_blocking(move || {
-        let _ = eng1.stream_generate_with_config(&test_prompt_1, &cfg1, cancel1, tx1);
+        let tx_err = tx1.clone();
+        if let Err(e) = eng1.stream_generate_with_config(&test_prompt_1, &cfg1, cancel1, tx1) {
+            let _ = tx_err.send(StreamEvent::Error(e.to_string()));
+        }
     });
 
     let mut ttft_cold = 0;
@@ -246,7 +253,10 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize) -> Result<()> {
     let eng2 = engine.clone();
     let cfg2 = config.clone();
     tokio::task::spawn_blocking(move || {
-        let _ = eng2.stream_generate_with_config(&test_prompt_2, &cfg2, cancel2, tx2);
+        let tx_err = tx2.clone();
+        if let Err(e) = eng2.stream_generate_with_config(&test_prompt_2, &cfg2, cancel2, tx2) {
+            let _ = tx_err.send(StreamEvent::Error(e.to_string()));
+        }
     });
 
     let mut ttft_warm = 0;
@@ -313,11 +323,21 @@ async fn cmd_single_shot(cli: &Cli, prompt: &str, preset: &str) -> Result<()> {
 
         let (tx, mut rx) = unbounded_channel();
         let cancel = Arc::new(AtomicBool::new(false));
-        let max_tokens = cli.max_tokens;
-        let temperature = cli.temperature;
+        let config = GenerationConfig {
+            max_tokens: cli.max_tokens,
+            temperature: cli.temperature,
+            min_p: cli.min_p,
+            top_p: cli.top_p,
+            top_k: cli.top_k,
+            use_ngram_speculative: false,
+            seed: cli.seed,
+        };
 
         tokio::task::spawn_blocking(move || {
-            let _ = engine.stream_generate(&full_prompt, max_tokens, temperature, cancel, tx);
+            let tx_err = tx.clone();
+            if let Err(e) = engine.stream_generate(&full_prompt, &config, cancel, tx) {
+                let _ = tx_err.send(StreamEvent::Error(e.to_string()));
+            }
         });
 
         use std::io::Write;
@@ -366,10 +386,14 @@ async fn cmd_single_shot(cli: &Cli, prompt: &str, preset: &str) -> Result<()> {
         top_p: cli.top_p,
         top_k: cli.top_k,
         use_ngram_speculative: cli.ngram_speculative,
+        seed: cli.seed,
     };
 
     tokio::task::spawn_blocking(move || {
-        let _ = engine.stream_generate_with_config(&full_prompt, &config, cancel, tx);
+        let tx_err = tx.clone();
+        if let Err(e) = engine.stream_generate_with_config(&full_prompt, &config, cancel, tx) {
+            let _ = tx_err.send(StreamEvent::Error(e.to_string()));
+        }
     });
 
     use std::io::Write;
@@ -520,6 +544,7 @@ fn run_tui(
     top_p: f32,
     top_k: i32,
     ngram_speculative: bool,
+    seed: Option<u32>,
 ) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -536,6 +561,7 @@ fn run_tui(
         top_p,
         top_k,
         ngram_speculative,
+        seed,
     );
 
     let last_tick = Instant::now();
