@@ -72,6 +72,7 @@ impl Theme {
             .add_modifier(Modifier::BOLD)
     }
 
+    #[allow(dead_code)]
     pub fn magenta_badge(&self) -> Style {
         Style::default()
             .fg(self.neon_magenta)
@@ -79,6 +80,7 @@ impl Theme {
             .add_modifier(Modifier::BOLD)
     }
 
+    #[allow(dead_code)]
     pub fn border_style(&self, active: bool) -> Style {
         if active {
             Style::default().fg(self.border_focus)

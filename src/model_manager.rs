@@ -204,6 +204,7 @@ impl ModelManager {
     }
 
     /// Check if a path points to a GGUF model file
+    #[allow(dead_code)]
     pub fn is_gguf_model(path: &Path) -> bool {
         path.is_file()
             && path

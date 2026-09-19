@@ -9,7 +9,7 @@ use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
 use std::num::NonZeroU32;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
@@ -25,6 +25,9 @@ pub enum StreamEvent {
         ttft_ms: u128,
         tokens_per_sec: f64,
         total_tokens: usize,
+        prompt_tokens: usize,
+        context_used: usize,
+        context_capacity: u32,
         prefix_tokens_reused: usize,
         prefix_cache_hit: bool,
         kv_type: String,
@@ -120,7 +123,7 @@ pub struct ModelEngine {
     pub kv_mode: KvQuantMode,
     pub use_mlock: bool,
     pub n_gpu_layers: u32,
-    pub n_ctx: u32,
+    pub n_ctx: AtomicU32,
 }
 
 unsafe impl Send for ModelEngine {}
@@ -178,7 +181,7 @@ impl ModelEngine {
             kv_mode: resolved_kv,
             use_mlock,
             n_gpu_layers,
-            n_ctx,
+            n_ctx: AtomicU32::new(n_ctx),
         })
     }
 
@@ -188,6 +191,16 @@ impl ModelEngine {
 
     pub fn offloaded_layers(&self) -> u32 {
         self.model.n_layer().min(self.n_gpu_layers)
+    }
+
+    /// Dynamically reconfigure context size without reloading model weights
+    pub fn reconfigure_context(&self, new_n_ctx: u32) -> Result<()> {
+        let mut ctx_guard = self.context.lock().unwrap();
+        *ctx_guard = None;
+        let mut cached_guard = self.cached_tokens.lock().unwrap();
+        cached_guard.clear();
+        self.n_ctx.store(new_n_ctx, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Explicitly clear the persistent prefix cache
@@ -203,6 +216,7 @@ impl ModelEngine {
     }
 
     /// Backward-compatible stream generation
+    #[allow(dead_code)]
     pub fn stream_generate(
         &self,
         prompt: &str,
@@ -242,7 +256,7 @@ impl ModelEngine {
             }
         };
 
-        let max_ctx = self.n_ctx as usize;
+        let max_ctx = self.n_ctx.load(Ordering::Relaxed) as usize;
         let safe_prompt_limit = max_ctx.saturating_sub(config.max_tokens.min(max_ctx / 2).max(128));
 
         let prompt_tokens = if prompt_tokens.len() > safe_prompt_limit {
@@ -263,19 +277,30 @@ impl ModelEngine {
             return Ok(());
         }
 
-        let n_batch = 2048.min(self.n_ctx);
+        // Elevate thread QoS on macOS to User Interactive to ensure thread stays pinned on high-frequency Performance Cores
+        #[cfg(target_os = "macos")]
+        unsafe {
+            unsafe extern "C" {
+                fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+            }
+            let _ = pthread_set_qos_class_self_np(0x21, 0);
+        }
+
+        let n_ctx_val = self.n_ctx.load(Ordering::Relaxed);
+        let n_batch = 2048.min(n_ctx_val);
         let n_ubatch = 512.min(n_batch);
+        let p_cores = SiliconProfile::detect().p_cores.max(1) as i32;
 
         // 2. Lock and acquire or initialize persistent context
         let mut ctx_guard = self.context.lock().unwrap();
         if ctx_guard.is_none() {
             let ctx_params = LlamaContextParams::default()
-                .with_n_ctx(Some(NonZeroU32::new(self.n_ctx).unwrap()))
-                .with_n_threads(4)
-                .with_n_threads_batch(8)
+                .with_n_ctx(Some(NonZeroU32::new(n_ctx_val).unwrap()))
+                .with_n_threads(p_cores)
+                .with_n_threads_batch(p_cores)
                 .with_n_batch(n_batch)
                 .with_n_ubatch(n_ubatch)
-                .with_flash_attention_policy(llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_AUTO)
+                .with_flash_attention_policy(llama_cpp_sys_2::LLAMA_FLASH_ATTN_TYPE_ENABLED)
                 .with_type_k(self.kv_mode.to_llama_type())
                 .with_type_v(self.kv_mode.to_llama_type());
 
@@ -381,9 +406,9 @@ impl ModelEngine {
             }
 
             // Context Shifting: Prevent overflow when approaching context capacity
-            if (n_curr + 32) >= self.n_ctx as usize {
-                let keep = (self.n_ctx / 8).max(32) as u32;
-                let drop = (self.n_ctx / 4).max(64) as u32;
+            if (n_curr + 32) >= n_ctx_val as usize {
+                let keep = (n_ctx_val / 8).max(32);
+                let drop = (n_ctx_val / 4).max(64);
                 if (n_curr as u32) > keep + drop {
                     let _ = ctx.kv_cache_seq_rm(0, Some(keep), Some(keep + drop));
                     let _ = ctx.kv_cache_seq_add(0, Some(keep + drop), Some(n_curr as u32), -(drop as i32));
@@ -510,6 +535,9 @@ impl ModelEngine {
             ttft_ms,
             tokens_per_sec: tps,
             total_tokens: total_generated,
+            prompt_tokens: n_prompt,
+            context_used: n_curr,
+            context_capacity: n_ctx_val,
             prefix_tokens_reused,
             prefix_cache_hit,
             kv_type: self.kv_mode.label().to_string(),
@@ -578,6 +606,7 @@ impl InferenceEngine {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_mlx(&self) -> bool {
         matches!(self, InferenceEngine::Mlx(_))
     }
@@ -617,9 +646,16 @@ impl InferenceEngine {
         }
     }
 
+    pub fn reconfigure_context(&self, new_n_ctx: u32) -> Result<()> {
+        match self {
+            InferenceEngine::Gguf(e) => e.reconfigure_context(new_n_ctx),
+            InferenceEngine::Mlx(_) => Ok(()),
+        }
+    }
+
     pub fn n_ctx(&self) -> u32 {
         match self {
-            InferenceEngine::Gguf(e) => e.n_ctx,
+            InferenceEngine::Gguf(e) => e.n_ctx.load(Ordering::Relaxed),
             InferenceEngine::Mlx(_) => 32768,
         }
     }

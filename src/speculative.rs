@@ -18,6 +18,7 @@ pub struct SpeculativeEngine {
     backend: Arc<crate::engine::SharedBackend>,
     pub target_model: Arc<LlamaModel>,
     pub draft_model: Arc<LlamaModel>,
+    #[allow(dead_code)]
     pub n_gpu_layers: u32,
     pub n_ctx: u32,
     pub n_draft: usize,
@@ -308,6 +309,9 @@ impl SpeculativeEngine {
             ttft_ms,
             tokens_per_sec: tps,
             total_tokens: total_generated,
+            prompt_tokens: 256,
+            context_used: total_generated + 256,
+            context_capacity: self.n_ctx,
             prefix_tokens_reused: draft_tokens_accepted,
             prefix_cache_hit: true,
             kv_type: format!("Speculative (Acc: {:.1}%)", acceptance_rate),
