@@ -86,6 +86,7 @@ pub struct App<'a> {
 }
 
 impl<'a> App<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         engine: InferenceEngine,
         model_path: PathBuf,
@@ -198,7 +199,7 @@ impl<'a> App<'a> {
                         if let Some(path) = ModelManager::resolve_model_path(Some(Path::new(&target))) {
                             let _ = self.switch_model(path);
                         } else {
-                            self.set_toast(&format!("❌ Model '{}' not found. Type /model to see list.", target));
+                            self.set_toast(&format!("❌ Model '{target}' not found. Type /model to see list."));
                         }
                     } else {
                         self.open_model_picker();
@@ -225,7 +226,7 @@ impl<'a> App<'a> {
                     if parts.len() > 1 {
                         let path_str = parts[1..].join(" ");
                         if let Err(e) = self.attach_file(&path_str) {
-                            self.set_toast(&format!("❌ Attachment failed: {}", e));
+                            self.set_toast(&format!("❌ Attachment failed: {e}"));
                         }
                     } else {
                         self.open_attach_modal();
@@ -374,7 +375,7 @@ impl<'a> App<'a> {
                     }
                     StreamEvent::Error(err) => {
                         self.engine_state = EngineState::Error;
-                        self.set_toast(&format!("❌ {}", err));
+                        self.set_toast(&format!("❌ {err}"));
                         break;
                     }
                 }
@@ -457,7 +458,7 @@ impl<'a> App<'a> {
 
         let is_mlx = ModelManager::is_mlx_model(&target_path);
         let backend_msg = if is_mlx { "Apple MLX" } else { "Metal GPU" };
-        self.set_toast(&format!("⏳ Loading {} onto {}...", filename, backend_msg));
+        self.set_toast(&format!("⏳ Loading {filename} onto {backend_msg}..."));
 
         // 1. Cancel active generation & clear KV cache
         self.cancel_generation();
@@ -476,11 +477,11 @@ impl<'a> App<'a> {
                 self.model_name = filename.clone();
                 self.chat_history.clear();
                 self.current_stream.clear();
-                self.set_toast(&format!("✔ Active Model: {} ({} Ready)", filename, badge));
+                self.set_toast(&format!("✔ Active Model: {filename} ({badge} Ready)"));
                 Ok(())
             }
             Err(e) => {
-                self.set_toast(&format!("❌ Failed to load model: {}", e));
+                self.set_toast(&format!("❌ Failed to load model: {e}"));
                 Err(e)
             }
         }

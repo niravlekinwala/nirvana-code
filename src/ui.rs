@@ -103,7 +103,7 @@ fn draw_header_hud(f: &mut Frame, app: &App, area: Rect) {
         ),
         Span::raw(" "),
         Span::styled(
-            format!(" {} ", prefix_text),
+            format!(" {prefix_text} "),
             if app.current_prefix_hit {
                 app.theme.green_badge()
             } else {
@@ -119,11 +119,11 @@ fn draw_header_hud(f: &mut Frame, app: &App, area: Rect) {
     // 3. Live Silicon Performance Metrics
     let ttft_str = app
         .current_ttft_ms
-        .map(|ms| format!("{}ms", ms))
+        .map(|ms| format!("{ms}ms"))
         .unwrap_or_else(|| "--".to_string());
     let tps_str = app
         .current_tps
-        .map(|tps| format!("{:.1} tok/s", tps))
+        .map(|tps| format!("{tps:.1} tok/s"))
         .unwrap_or_else(|| "--".to_string());
 
     let perf_spans = vec![
@@ -166,8 +166,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
         .split(area);
 
     // 1. Template & Mode Info
-    let mut mode_lines = Vec::new();
-    mode_lines.push(Line::from(vec![
+    let mut mode_lines = vec![Line::from(vec![
         Span::styled("Mode: ", Style::default().fg(app.theme.text_muted)),
         Span::styled(
             match app.mode {
@@ -177,7 +176,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
             },
             Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD),
         ),
-    ]));
+    ])];
     mode_lines.push(Line::from(vec![
         Span::styled("Target: ", Style::default().fg(app.theme.text_muted)),
         Span::styled(
@@ -277,7 +276,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
 
         catalog_items.push(ListItem::new(vec![
             Line::from(vec![
-                Span::styled(format!("{} ", status_icon), status_style),
+                Span::styled(format!("{status_icon} "), status_style),
                 Span::styled(meta.id, Style::default().fg(app.theme.text_bright).add_modifier(Modifier::BOLD)),
                 Span::styled(format!(" ({:.1}G)", meta.size_gb), Style::default().fg(app.theme.text_muted)),
             ]),
@@ -396,7 +395,7 @@ fn draw_content_pane(f: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 "".to_string()
             };
-            let live_header = format!("NIRVANA GENERATING...{}", prefix_badge);
+            let live_header = format!("NIRVANA GENERATING...{prefix_badge}");
             lines.push(Line::from(vec![
                 Span::styled(live_header, Style::default().fg(app.theme.neon_green).add_modifier(Modifier::BOLD)),
             ]));
@@ -539,7 +538,7 @@ fn draw_footer_status(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("Palette  ", Style::default().fg(app.theme.text_dim)),
         Span::styled("[Ctrl+C] ", Style::default().fg(app.theme.text_muted)),
         Span::styled("Exit  ", Style::default().fg(app.theme.text_dim)),
-        Span::styled(format!("   {}", toast), Style::default().fg(app.theme.neon_green).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("   {toast}"), Style::default().fg(app.theme.neon_green).add_modifier(Modifier::BOLD)),
     ]);
 
     let footer_p = Paragraph::new(footer_line).style(Style::default().bg(app.theme.bg_card));

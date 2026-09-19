@@ -103,7 +103,7 @@ async fn main() -> Result<()> {
 
     println!("⚡ Loading Nirvana Code Silicon Engine...");
     println!("   Model:       {}", model_path.display());
-    println!("   Backend:     {}", backend_str);
+    println!("   Backend:     {backend_str}");
     println!("   KV-Cache:    {}", kv_mode.label());
     println!("   MLock:       {}", if use_mlock { "Enabled (LPDDR5 RAM Pinned)" } else { "Disabled" });
     if !is_mlx {
@@ -149,7 +149,7 @@ fn cmd_list_models() -> Result<()> {
             let size_str = if size_mb >= 1024 {
                 format!("{:.1} GB", size_mb as f64 / 1024.0)
             } else {
-                format!("{} MB", size_mb)
+                format!("{size_mb} MB")
             };
             let backend_badge = if ModelManager::is_mlx_model(path) {
                 "[Apple MLX]"
@@ -200,13 +200,11 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize) -> Result<()> {
 
     let system_prompt = "You are Nirvana Code, an ultra-fast Apple Silicon coding assistant. Provide clean Rust code.";
     let test_prompt_1 = format!(
-        "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\nWrite a fast concurrent queue in Rust using atomic pointers.<|im_end|>\n<|im_start|>assistant\n",
-        system_prompt
+        "<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\nWrite a fast concurrent queue in Rust using atomic pointers.<|im_end|>\n<|im_start|>assistant\n"
     );
 
     let test_prompt_2 = format!(
-        "<|im_start|>system\n{}<|im_end|>\n<|im_start|>user\nExplain how the concurrent queue prevents data races.<|im_end|>\n<|im_start|>assistant\n",
-        system_prompt
+        "<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\nExplain how the concurrent queue prevents data races.<|im_end|>\n<|im_start|>assistant\n"
     );
 
     let config = GenerationConfig {
@@ -237,8 +235,8 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize) -> Result<()> {
             tps_cold = tokens_per_sec;
         }
     }
-    println!("   Cold TTFT:    {} ms", ttft_cold);
-    println!("   Decode Speed: {:.1} tokens/sec\n", tps_cold);
+    println!("   Cold TTFT:    {ttft_cold} ms");
+    println!("   Decode Speed: {tps_cold:.1} tokens/sec\n");
 
     // Turn 2: Warm Prefix Cache Reuse
     println!("⚡ [Turn 2] Warm Prefix Cache Reuse (Reusing system prompt KV state)...");
@@ -261,8 +259,8 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize) -> Result<()> {
             prefix_reused = prefix_tokens_reused;
         }
     }
-    println!("   Warm TTFT:    {} ms (Prefix tokens reused: {})", ttft_warm, prefix_reused);
-    println!("   Decode Speed: {:.1} tokens/sec\n", tps_warm);
+    println!("   Warm TTFT:    {ttft_warm} ms (Prefix tokens reused: {prefix_reused})");
+    println!("   Decode Speed: {tps_warm:.1} tokens/sec\n");
 
     let speedup = if ttft_cold > 0 && ttft_warm < ttft_cold {
         ((ttft_cold as f64 - ttft_warm as f64) / ttft_cold as f64) * 100.0
@@ -271,7 +269,7 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize) -> Result<()> {
     };
 
     println!("🏆 BENCHMARK RESULTS:");
-    println!("   Prefix Caching TTFT Reduction: {:.1}% latency reduction!", speedup);
+    println!("   Prefix Caching TTFT Reduction: {speedup:.1}% latency reduction!");
     println!("   KV-Cache Quantization:         {} active.", engine.kv_label());
     println!("   Memory Locking (mlock):        Zero virtual memory page faults.\n");
 
@@ -326,7 +324,7 @@ async fn cmd_single_shot(cli: &Cli, prompt: &str, preset: &str) -> Result<()> {
         while let Some(event) = rx.recv().await {
             match event {
                 StreamEvent::Token(tok) => {
-                    print!("{}", tok);
+                    print!("{tok}");
                     let _ = io::stdout().flush();
                 }
                 StreamEvent::Stats {
@@ -337,13 +335,12 @@ async fn cmd_single_shot(cli: &Cli, prompt: &str, preset: &str) -> Result<()> {
                     ..
                 } => {
                     println!(
-                        "\n\n[Stats: TTFT: {}ms | {:.1} tok/s | {} tokens | {}]",
-                        ttft_ms, tokens_per_sec, total_tokens, kv_type
+                        "\n\n[Stats: TTFT: {ttft_ms}ms | {tokens_per_sec:.1} tok/s | {total_tokens} tokens | {kv_type}]"
                     );
                 }
                 StreamEvent::Done => break,
                 StreamEvent::Error(err) => {
-                    eprintln!("\nError: {}", err);
+                    eprintln!("\nError: {err}");
                     break;
                 }
             }
@@ -379,7 +376,7 @@ async fn cmd_single_shot(cli: &Cli, prompt: &str, preset: &str) -> Result<()> {
     while let Some(event) = rx.recv().await {
         match event {
             StreamEvent::Token(tok) => {
-                print!("{}", tok);
+                print!("{tok}");
                 let _ = io::stdout().flush();
             }
             StreamEvent::Stats {
@@ -390,13 +387,12 @@ async fn cmd_single_shot(cli: &Cli, prompt: &str, preset: &str) -> Result<()> {
                 ..
             } => {
                 println!(
-                    "\n\n[Stats: TTFT: {}ms | {:.1} tok/s | {} tokens | Prefix Hit: {}]",
-                    ttft_ms, tokens_per_sec, total_tokens, prefix_cache_hit
+                    "\n\n[Stats: TTFT: {ttft_ms}ms | {tokens_per_sec:.1} tok/s | {total_tokens} tokens | Prefix Hit: {prefix_cache_hit}]"
                 );
             }
             StreamEvent::Done => break,
             StreamEvent::Error(err) => {
-                eprintln!("\nError: {}", err);
+                eprintln!("\nError: {err}");
                 break;
             }
         }
@@ -486,7 +482,7 @@ async fn cmd_web(cli: &Cli, port: u16, host: &str, open_browser: bool) -> Result
             tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
             #[cfg(target_os = "macos")]
             let _ = std::process::Command::new("open")
-                .arg(format!("http://{}:{}", host_clone, port))
+                .arg(format!("http://{host_clone}:{port}"))
                 .spawn();
             #[cfg(target_os = "linux")]
             let _ = std::process::Command::new("xdg-open")
@@ -514,6 +510,7 @@ async fn cmd_web(cli: &Cli, port: u16, host: &str, open_browser: bool) -> Result
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_tui(
     engine: InferenceEngine,
     model_path: PathBuf,
@@ -552,7 +549,7 @@ fn run_tui(
     terminal.show_cursor()?;
 
     if let Err(e) = res {
-        eprintln!("Nirvana Code execution error: {:?}", e);
+        eprintln!("Nirvana Code execution error: {e:?}");
     }
 
     Ok(())
@@ -662,7 +659,7 @@ fn run_app_loop(
                                     let path_to_attach = app.attach_input.trim().to_string();
                                     if !path_to_attach.is_empty() {
                                         if let Err(e) = app.attach_file(&path_to_attach) {
-                                            app.set_toast(&format!("❌ Failed to attach: {}", e));
+                                            app.set_toast(&format!("❌ Failed to attach: {e}"));
                                         }
                                     }
                                     app.close_attach_modal();

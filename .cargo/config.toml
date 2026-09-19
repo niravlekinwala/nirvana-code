@@ -1,2 +1,6 @@
+# `target-cpu=native` gives the best local build (and makes llama-cpp-sys-2
+# enable GGML_NATIVE). It is NOT safe for distributed binaries: a binary built
+# on an M4 (SME) will crash on an M1. Release/CI artifacts should be built with
+# `RUSTFLAGS="-C target-cpu=apple-m1"` instead — see RELEASE_PLAN.md Phase 3 §8.
 [target.aarch64-apple-darwin]
 rustflags = ["-C", "target-cpu=native"]

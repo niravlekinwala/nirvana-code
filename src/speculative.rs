@@ -88,7 +88,7 @@ impl SpeculativeEngine {
         let target_tokens = match self.target_model.str_to_token(prompt, AddBos::Always) {
             Ok(tokens) => tokens,
             Err(e) => {
-                let _ = tx.send(StreamEvent::Error(format!("Target tokenization failed: {}", e)));
+                let _ = tx.send(StreamEvent::Error(format!("Target tokenization failed: {e}")));
                 bail!("Tokenization failed");
             }
         };
@@ -96,7 +96,7 @@ impl SpeculativeEngine {
         let draft_tokens = match self.draft_model.str_to_token(prompt, AddBos::Always) {
             Ok(tokens) => tokens,
             Err(e) => {
-                let _ = tx.send(StreamEvent::Error(format!("Draft tokenization failed: {}", e)));
+                let _ = tx.send(StreamEvent::Error(format!("Draft tokenization failed: {e}")));
                 bail!("Draft tokenization failed");
             }
         };
@@ -314,7 +314,7 @@ impl SpeculativeEngine {
             context_capacity: self.n_ctx,
             prefix_tokens_reused: draft_tokens_accepted,
             prefix_cache_hit: true,
-            kv_type: format!("Speculative (Acc: {:.1}%)", acceptance_rate),
+            kv_type: format!("Speculative (Acc: {acceptance_rate:.1}%)"),
             mlock_active: true,
         });
 

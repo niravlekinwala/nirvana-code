@@ -28,15 +28,13 @@ pub struct PaletteManager;
 
 impl PaletteManager {
     pub fn build_items(installed_models: &[(std::path::PathBuf, String, u64)]) -> Vec<PaletteItem> {
-        let mut items = Vec::new();
-
         // 1. Actions & Controls
-        items.push(PaletteItem {
+        let mut items = vec![PaletteItem {
             title: "Attach File (PDF, Image, Doc, Code)".to_string(),
             subtitle: "Attach local PDF, screenshot, doc, or code file [Ctrl+F or /attach]".to_string(),
             category: "Input",
             action: PaletteAction::AttachFile,
-        });
+        }];
 
         items.push(PaletteItem {
             title: "Detach Current Attached File".to_string(),
@@ -148,7 +146,7 @@ impl PaletteManager {
         for (path, name, size) in installed_models {
             let size_mb = size / (1024 * 1024);
             items.push(PaletteItem {
-                title: format!("Model: {}", name),
+                title: format!("Model: {name}"),
                 subtitle: format!("{} MB | {}", size_mb, path.display()),
                 category: "Models",
                 action: PaletteAction::SelectModel(path.to_string_lossy().to_string()),

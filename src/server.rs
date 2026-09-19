@@ -309,7 +309,7 @@ async fn handle_process_attachment(
         Ok(Ok(att)) => {
             let preview = if att.extracted_text.chars().count() > 400 {
                 let s: String = att.extracted_text.chars().take(400).collect();
-                format!("{}...", s)
+                format!("{s}...")
             } else {
                 att.extracted_text.clone()
             };
@@ -459,7 +459,7 @@ async fn handle_load_model(
 
     let is_mlx = ModelManager::is_mlx_model(&resolved_path);
     let backend_name = if is_mlx { "Apple MLX" } else { "Metal GPU" };
-    println!("⚡ Dynamic Model Switch: Loading {} into {}...", model_name, backend_name);
+    println!("⚡ Dynamic Model Switch: Loading {model_name} into {backend_name}...");
 
     let gpu_layers = state.gpu_layers;
     let use_mlock = state.use_mlock;
@@ -480,18 +480,18 @@ async fn handle_load_model(
             inner.model_path = resolved_path.clone();
             drop(inner);
 
-            println!("✔ Switched active model to {} ({} Ready)", model_name, badge);
+            println!("✔ Switched active model to {model_name} ({badge} Ready)");
 
             Json(LoadModelResponse {
                 status: "ok".to_string(),
                 model: model_name,
                 path: resolved_path.display().to_string(),
-                message: format!("Model successfully loaded onto {}", badge),
+                message: format!("Model successfully loaded onto {badge}"),
             })
             .into_response()
         }
         Ok(Err(e)) => {
-            eprintln!("❌ Failed to load model: {}", e);
+            eprintln!("❌ Failed to load model: {e}");
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
@@ -599,7 +599,7 @@ async fn handle_engine_reset(State(state): State<ServerState>) -> Response {
     let model_name = inner.model_name.clone();
     drop(inner);
 
-    println!("🛑 [Emergency Reset] Generation aborted and engine cache cleared ({})", model_name);
+    println!("🛑 [Emergency Reset] Generation aborted and engine cache cleared ({model_name})");
 
     Json(serde_json::json!({
         "status": "ok",
@@ -997,7 +997,7 @@ async fn handle_chat_completions(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let req_id = format!("chatcmpl-{}", now);
+    let req_id = format!("chatcmpl-{now}");
 
     let config = GenerationConfig {
         max_tokens: payload.max_tokens,
@@ -1099,7 +1099,7 @@ async fn handle_chat_completions(
                         });
                         yield Ok(Event::default().data(stats_json.to_string()));
                     }
-                    StreamEvent::Done { .. } => {
+                    StreamEvent::Done => {
                         let final_chunk = ChatCompletionChunk {
                             id: req_id.clone(),
                             object: "chat.completion.chunk",
@@ -1171,6 +1171,7 @@ async fn handle_chat_completions(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_server(
     engine: InferenceEngine,
     model_name: String,
@@ -1202,11 +1203,11 @@ pub async fn run_server(
 
     println!("\n⚡ [NIRVANA CODE] Web UI & OpenAI-Compatible Local API Server");
     println!("   Platform:        Apple Silicon Metal 3 Unified LPDDR5");
-    println!("   Model:           {}", model_name);
-    println!("   Web Interface:   http://{}:{}", host, port);
-    println!("   Chat API URL:    http://{}:{}/v1/chat/completions", host, port);
-    println!("   Models API URL:  http://{}:{}/v1/models", host, port);
-    println!("   Switch API URL:  POST http://{}:{}/v1/models/load", host, port);
+    println!("   Model:           {model_name}");
+    println!("   Web Interface:   http://{host}:{port}");
+    println!("   Chat API URL:    http://{host}:{port}/v1/chat/completions");
+    println!("   Models API URL:  http://{host}:{port}/v1/models");
+    println!("   Switch API URL:  POST http://{host}:{port}/v1/models/load");
 
     // If Unix socket is configured
     if let Some(ref sock) = socket_path {
@@ -1224,7 +1225,7 @@ pub async fn run_server(
     println!("\n   Ready for Web Browser, VS Code Continue, Cursor, Neovim, and OpenAI SDKs!");
     println!("   Press Ctrl+C to stop.\n");
 
-    let addr = format!("{}:{}", host, port);
+    let addr = format!("{host}:{port}");
     let tcp_listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(tcp_listener, app).await?;
 

@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, release-prep]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-test:
+    name: Build, clippy, test (Apple Silicon)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+        continue-on-error: true
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test
+      - name: Release build (portable apple-m1 baseline)
+        run: cargo build --release
+        env:
+          RUSTFLAGS: "-C target-cpu=apple-m1"
+
+  catalog-urls:
+    name: Verify model catalog URLs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: HEAD-check every catalog URL
+        run: |
+          set -u
+          fail=0
+          for url in $(grep -oE 'url: "https?://[^"]+"' src/model_manager.rs | sed -E 's/url: "(.*)"/\1/'); do
+            code=$(curl -sIL -o /dev/null -w '%{http_code}' --max-time 30 "$url")
+            if [ "$code" != "200" ]; then
+              echo "::error::$code $url"; fail=1
+            else
+              echo "ok  $url"
+            fi
+          done
+          exit $fail
