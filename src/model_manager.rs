@@ -169,48 +169,152 @@ impl ModelManager {
         dirs::home_dir().map(|h| h.join(".promptcraft").join("models"))
     }
 
+    pub fn lmstudio_dir() -> Option<PathBuf> {
+        if let Some(home) = dirs::home_dir() {
+            // 1. Check ~/.lmstudio/settings.json for explicit downloadsFolder
+            let settings_file = home.join(".lmstudio").join("settings.json");
+            if settings_file.exists() {
+                if let Ok(content) = fs::read_to_string(&settings_file) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if let Some(df) = v.get("downloadsFolder").and_then(|s| s.as_str()) {
+                            let p = PathBuf::from(df);
+                            if p.exists() {
+                                return Some(p);
+                            }
+                        }
+                    }
+                }
+            }
+            // 2. Default ~/.lmstudio/models
+            let default_lm = home.join(".lmstudio").join("models");
+            if default_lm.exists() {
+                return Some(default_lm);
+            }
+        }
+        None
+    }
+
+    /// Check if a path points to an Apple MLX model directory (contains config.json)
+    pub fn is_mlx_model(path: &Path) -> bool {
+        if path.is_dir() {
+            path.join("config.json").exists()
+        } else {
+            false
+        }
+    }
+
+    /// Check if a path points to a GGUF model file
+    pub fn is_gguf_model(path: &Path) -> bool {
+        path.is_file()
+            && path
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.eq_ignore_ascii_case("gguf"))
+                .unwrap_or(false)
+    }
+
+    /// Compute total size of all files inside an MLX directory
+    pub fn compute_dir_size(dir: &Path) -> u64 {
+        let mut total = 0;
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    if meta.is_file() {
+                        total += meta.len();
+                    }
+                }
+            }
+        }
+        total
+    }
+
     pub fn list_installed() -> Vec<(PathBuf, String, u64)> {
         let mut list = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
         // 1. Check primary ~/.nirvana/models
         if let Ok(dir) = Self::default_dir() {
-            Self::scan_dir(&dir, &mut list, &mut seen);
+            Self::scan_dir_recursive(&dir, 0, 4, &mut list, &mut seen);
         }
 
-        // 2. Check secondary ~/.promptcraft/models
+        // 2. Check LM Studio models folder (~/.lmstudio/models)
+        if let Some(dir) = Self::lmstudio_dir() {
+            Self::scan_dir_recursive(&dir, 0, 5, &mut list, &mut seen);
+        }
+
+        // 3. Check secondary ~/.promptcraft/models
         if let Some(dir) = Self::secondary_dir() {
             if dir.exists() {
-                Self::scan_dir(&dir, &mut list, &mut seen);
+                Self::scan_dir_recursive(&dir, 0, 4, &mut list, &mut seen);
             }
         }
 
-        // 3. Check current working directory models/
+        // 4. Check current working directory models/
         let local = PathBuf::from("models");
         if local.exists() {
-            Self::scan_dir(&local, &mut list, &mut seen);
+            Self::scan_dir_recursive(&local, 0, 4, &mut list, &mut seen);
         }
 
         list
     }
 
-    fn scan_dir(
+    fn scan_dir_recursive(
         dir: &Path,
+        depth: usize,
+        max_depth: usize,
         list: &mut Vec<(PathBuf, String, u64)>,
-        seen: &mut std::collections::HashSet<String>,
+        seen: &mut std::collections::HashSet<PathBuf>,
     ) {
+        if depth > max_depth || !dir.exists() {
+            return;
+        }
+
+        // 1. Check if current directory is an MLX model directory (has config.json)
+        if dir.is_dir() && Self::is_mlx_model(dir) {
+            let canon = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+            if !seen.contains(&canon) {
+                seen.insert(canon);
+                let folder_name = dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "mlx-model".to_string());
+                let name = format!("{} [MLX]", folder_name);
+                let size = Self::compute_dir_size(dir);
+                list.push((dir.to_path_buf(), name, size));
+            }
+            return; // Do not scan inside the MLX model directory
+        }
+
+        // 2. Traverse directory contents
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) == Some("gguf") {
-                    let name = path
+                if path.is_file() {
+                    let filename = path
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default();
-                    if !seen.contains(&name) {
-                        seen.insert(name.clone());
-                        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                        list.push((path, name, size));
+
+                    // Skip projection / adapter weights (e.g. mmproj-...) from standalone list
+                    if filename.starts_with("mmproj") {
+                        continue;
+                    }
+
+                    if path.extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("gguf")).unwrap_or(false) {
+                        let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+                        if !seen.contains(&canon) {
+                            seen.insert(canon);
+                            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                            list.push((path, filename, size));
+                        }
+                    }
+                } else if path.is_dir() {
+                    let dirname = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if !dirname.starts_with('.') {
+                        Self::scan_dir_recursive(&path, depth + 1, max_depth, list, seen);
                     }
                 }
             }
@@ -375,5 +479,37 @@ impl ModelManager {
         println!("\n✔ Model successfully cached at: {}", target_path.display());
 
         Ok(target_path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_mlx_model_detection() {
+        let temp_dir = std::env::temp_dir().join("nirvana_test_mlx");
+        let _ = fs::create_dir_all(&temp_dir);
+        let _ = fs::write(temp_dir.join("config.json"), "{}");
+        assert!(ModelManager::is_mlx_model(&temp_dir));
+
+        let non_mlx = std::env::temp_dir().join("nirvana_test_non_mlx");
+        let _ = fs::create_dir_all(&non_mlx);
+        assert!(!ModelManager::is_mlx_model(&non_mlx));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+        let _ = fs::remove_dir_all(&non_mlx);
+    }
+
+    #[test]
+    fn test_list_installed_includes_lmstudio() {
+        let installed = ModelManager::list_installed();
+        // User has LM Studio models installed, verify discovery
+        if let Some(lm_dir) = ModelManager::lmstudio_dir() {
+            if lm_dir.exists() {
+                let has_lmstudio = installed.iter().any(|(p, _, _)| p.starts_with(&lm_dir));
+                assert!(has_lmstudio, "Expected installed models to include LM Studio models");
+            }
+        }
     }
 }

@@ -4,6 +4,7 @@ mod cli;
 mod clipboard;
 mod engine;
 mod hardware;
+pub mod mlx_engine;
 mod model_manager;
 mod palette;
 mod server;
@@ -25,7 +26,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use engine::{GenerationConfig, KvQuantMode, ModelEngine, StreamEvent};
+use engine::{GenerationConfig, InferenceEngine, KvQuantMode, StreamEvent};
 use model_manager::{ModelManager, MODEL_CATALOG};
 use palette::PaletteManager;
 use ratatui::{backend::CrosstermBackend, Terminal};
@@ -74,7 +75,7 @@ async fn main() -> Result<()> {
     let model_path = match ModelManager::resolve_model_path(cli.model.as_deref()) {
         Some(p) => p,
         None => {
-            eprintln!("\n❌ No GGUF model found!");
+            eprintln!("\n❌ No installed model found!");
             eprintln!("Run the following command to download the recommended model:");
             eprintln!("   nirvana-code download qwen-1.5b\n");
             eprintln!("Or download a 16GB flagship model from the AtomicChat guide:");
@@ -93,24 +94,34 @@ async fn main() -> Result<()> {
 
     let use_mlock = !cli.no_mlock;
 
+    let is_mlx = ModelManager::is_mlx_model(&model_path);
+    let backend_str = if is_mlx {
+        "Apple Silicon MLX (Unified Memory GPU)"
+    } else {
+        "Metal 3 GPU (llama.cpp)"
+    };
+
     println!("⚡ Loading Nirvana Code Silicon Engine...");
     println!("   Model:       {}", model_path.display());
+    println!("   Backend:     {}", backend_str);
     println!("   KV-Cache:    {}", kv_mode.label());
     println!("   MLock:       {}", if use_mlock { "Enabled (LPDDR5 RAM Pinned)" } else { "Disabled" });
-    println!("   Metal GPU:   {} layers offloaded", cli.gpu_layers);
+    if !is_mlx {
+        println!("   Metal GPU:   {} layers offloaded", cli.gpu_layers);
+    }
     println!("   Context:     {} tokens", cli.ctx_size);
     if cli.ngram_speculative {
         println!("   Speculation: Prompt Lookup Decoding (N-gram matching) ENABLED");
     }
     println!();
 
-    let engine = Arc::new(ModelEngine::load(
+    let engine = InferenceEngine::load(
         &model_path,
         cli.gpu_layers,
         use_mlock,
         kv_mode,
         cli.ctx_size,
-    )?);
+    )?;
 
     run_tui(
         engine,
@@ -129,13 +140,23 @@ fn cmd_list_models() -> Result<()> {
     println!("\n⚡ [NIRVANA CODE] Silicon Model Manager (Apple M2 Pro 16GB Unified RAM)\n");
 
     let installed = ModelManager::list_installed();
-    println!("📦 Installed Local Models (Checked ~/.nirvana/models & ~/.promptcraft/models):");
+    println!("📦 Installed Local Models (Checked ~/.nirvana, ~/.lmstudio, ~/.promptcraft):");
     if installed.is_empty() {
         println!("   (None installed yet. Run 'nirvana-code download qwen-1.5b' to download)");
     } else {
-        for (path, name, size) in &installed {
+        for (i, (path, name, size)) in installed.iter().enumerate() {
             let size_mb = size / (1024 * 1024);
-            println!("   ✔ {:<42} {:>6} MB   {}", name, size_mb, path.display());
+            let size_str = if size_mb >= 1024 {
+                format!("{:.1} GB", size_mb as f64 / 1024.0)
+            } else {
+                format!("{} MB", size_mb)
+            };
+            let backend_badge = if ModelManager::is_mlx_model(path) {
+                "[Apple MLX]"
+            } else {
+                "[Metal GGUF]"
+            };
+            println!("   {:>2}. {:<12} {:<45} {:>8}   {}", i + 1, backend_badge, name, size_str, path.display());
         }
     }
 
@@ -175,7 +196,7 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize) -> Result<()> {
     }
     println!();
 
-    let engine = Arc::new(ModelEngine::load(&model_path, cli.gpu_layers, true, kv_mode, cli.ctx_size)?);
+    let engine = InferenceEngine::load(&model_path, cli.gpu_layers, true, kv_mode, cli.ctx_size)?;
 
     let system_prompt = "You are Nirvana Code, an ultra-fast Apple Silicon coding assistant. Provide clean Rust code.";
     let test_prompt_1 = format!(
@@ -251,7 +272,7 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize) -> Result<()> {
 
     println!("🏆 BENCHMARK RESULTS:");
     println!("   Prefix Caching TTFT Reduction: {:.1}% latency reduction!", speedup);
-    println!("   KV-Cache Quantization:         {} active.", engine.kv_mode.label());
+    println!("   KV-Cache Quantization:         {} active.", engine.kv_label());
     println!("   Memory Locking (mlock):        Zero virtual memory page faults.\n");
 
     Ok(())
@@ -337,7 +358,7 @@ async fn cmd_single_shot(cli: &Cli, prompt: &str, preset: &str) -> Result<()> {
         _ => KvQuantMode::Auto,
     };
 
-    let engine = ModelEngine::load(&model_path, cli.gpu_layers, !cli.no_mlock, kv_mode, cli.ctx_size)?;
+    let engine = InferenceEngine::load(&model_path, cli.gpu_layers, !cli.no_mlock, kv_mode, cli.ctx_size)?;
 
     let (tx, mut rx) = unbounded_channel();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -401,13 +422,13 @@ async fn cmd_serve(cli: &Cli, port: u16, host: &str, socket: Option<&Path>) -> R
         _ => KvQuantMode::Auto,
     };
 
-    let engine = Arc::new(ModelEngine::load(
+    let engine = InferenceEngine::load(
         &model_path,
         cli.gpu_layers,
         !cli.no_mlock,
         kv_mode,
         cli.ctx_size,
-    )?);
+    )?;
 
     let model_name = model_path
         .file_name()
@@ -446,13 +467,13 @@ async fn cmd_web(cli: &Cli, port: u16, host: &str, open_browser: bool) -> Result
         _ => KvQuantMode::Auto,
     };
 
-    let engine = Arc::new(ModelEngine::load(
+    let engine = InferenceEngine::load(
         &model_path,
         cli.gpu_layers,
         !cli.no_mlock,
         kv_mode,
         cli.ctx_size,
-    )?);
+    )?;
 
     let model_name = model_path
         .file_name()
@@ -494,7 +515,7 @@ async fn cmd_web(cli: &Cli, port: u16, host: &str, open_browser: bool) -> Result
 }
 
 fn run_tui(
-    engine: Arc<ModelEngine>,
+    engine: InferenceEngine,
     model_path: PathBuf,
     max_tokens: usize,
     temperature: f32,

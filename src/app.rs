@@ -1,6 +1,6 @@
 use crate::attachment::Attachment;
 use crate::clipboard::ClipboardHelper;
-use crate::engine::{GenerationConfig, ModelEngine, StreamEvent};
+use crate::engine::{GenerationConfig, InferenceEngine, StreamEvent};
 use crate::hardware::SiliconProfile;
 use crate::model_manager::ModelManager;
 use crate::palette::{PaletteAction, PaletteItem, PaletteManager};
@@ -47,7 +47,7 @@ pub struct App<'a> {
     pub hardware: SiliconProfile,
     pub model_path: PathBuf,
     pub model_name: String,
-    pub engine: Arc<ModelEngine>,
+    pub engine: InferenceEngine,
     pub engine_state: EngineState,
     pub active_template: &'static PromptTemplate,
     pub chat_history: Vec<ChatMessage>,
@@ -87,7 +87,7 @@ pub struct App<'a> {
 
 impl<'a> App<'a> {
     pub fn new(
-        engine: Arc<ModelEngine>,
+        engine: InferenceEngine,
         model_path: PathBuf,
         max_tokens: usize,
         temperature: f32,
@@ -455,25 +455,28 @@ impl<'a> App<'a> {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "model".to_string());
 
-        self.set_toast(&format!("⏳ Loading {} onto Metal GPU...", filename));
+        let is_mlx = ModelManager::is_mlx_model(&target_path);
+        let backend_msg = if is_mlx { "Apple MLX" } else { "Metal GPU" };
+        self.set_toast(&format!("⏳ Loading {} onto {}...", filename, backend_msg));
 
         // 1. Cancel active generation & clear KV cache
         self.cancel_generation();
         self.engine.clear_cache();
 
-        let gpu_layers = self.engine.n_gpu_layers;
-        let use_mlock = self.engine.use_mlock;
-        let kv_mode = self.engine.kv_mode;
-        let ctx_size = self.engine.n_ctx;
+        let gpu_layers = self.engine.n_gpu_layers();
+        let use_mlock = self.engine.use_mlock();
+        let kv_mode = self.engine.kv_mode();
+        let ctx_size = self.engine.n_ctx();
 
-        match ModelEngine::load(&target_path, gpu_layers, use_mlock, kv_mode, ctx_size) {
+        match InferenceEngine::load(&target_path, gpu_layers, use_mlock, kv_mode, ctx_size) {
             Ok(new_engine) => {
-                self.engine = Arc::new(new_engine);
+                let badge = new_engine.backend_name();
+                self.engine = new_engine;
                 self.model_path = target_path.clone();
                 self.model_name = filename.clone();
                 self.chat_history.clear();
                 self.current_stream.clear();
-                self.set_toast(&format!("✔ Active Model: {} (Metal GPU Ready)", filename));
+                self.set_toast(&format!("✔ Active Model: {} ({} Ready)", filename, badge));
                 Ok(())
             }
             Err(e) => {
