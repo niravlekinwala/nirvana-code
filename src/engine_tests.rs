@@ -10,12 +10,12 @@
 //! target is used as its own draft, which must give ~100% acceptance.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
-use crate::chat::{render_chatml, ChatMessage};
+use crate::chat::{ChatMessage, render_chatml};
 use crate::engine::{GenerationConfig, KvQuantMode, ModelEngine, StreamEvent};
 use crate::speculative::SpeculativeEngine;
 
@@ -42,11 +42,21 @@ struct Run {
 }
 
 fn drain(mut rx: UnboundedReceiver<StreamEvent>) -> Run {
-    let mut run = Run { text: String::new(), total_tokens: 0, prefix_reused: 0, kv_type: String::new() };
+    let mut run = Run {
+        text: String::new(),
+        total_tokens: 0,
+        prefix_reused: 0,
+        kv_type: String::new(),
+    };
     while let Ok(ev) = rx.try_recv() {
         match ev {
             StreamEvent::Token(t) => run.text.push_str(&t),
-            StreamEvent::Stats { total_tokens, prefix_tokens_reused, kv_type, .. } => {
+            StreamEvent::Stats {
+                total_tokens,
+                prefix_tokens_reused,
+                kv_type,
+                ..
+            } => {
                 run.total_tokens = total_tokens;
                 run.prefix_reused = prefix_tokens_reused;
                 run.kv_type = kv_type;
@@ -69,7 +79,9 @@ fn greedy(max_tokens: usize, ngram: bool) -> GenerationConfig {
 }
 
 fn prompt(user: &str) -> String {
-    format!("<|im_start|>system\nYou are a terse assistant.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n")
+    format!(
+        "<|im_start|>system\nYou are a terse assistant.<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n"
+    )
 }
 
 fn run_gguf(engine: &ModelEngine, prompt: &str, config: &GenerationConfig) -> Run {
@@ -93,7 +105,8 @@ fn load_gguf(path: &Path) -> ModelEngine {
 }
 
 // A prompt whose answer repeats itself, so prompt-lookup has n-grams to hit.
-const REPETITIVE: &str = "List the numbers 1 to 10 as 'Item N: number N' lines, then list them again identically.";
+const REPETITIVE: &str =
+    "List the numbers 1 to 10 as 'Item N: number N' lines, then list them again identically.";
 
 #[test]
 #[ignore]
@@ -107,10 +120,17 @@ fn regenerate_reuses_prefix_and_is_deterministic() {
     let second = run_gguf(&engine, &p, &cfg);
 
     assert!(!first.text.is_empty());
-    assert_eq!(first.text, second.text, "greedy regenerate must be deterministic");
+    assert_eq!(
+        first.text, second.text,
+        "greedy regenerate must be deterministic"
+    );
     assert_eq!(first.prefix_reused, 0, "cold cache should reuse nothing");
     // Full hit: everything but the last prompt token is reused
-    let n_prompt = engine.model.str_to_token(&p, llama_cpp_2::model::AddBos::Always).unwrap().len();
+    let n_prompt = engine
+        .model
+        .str_to_token(&p, llama_cpp_2::model::AddBos::Always)
+        .unwrap()
+        .len();
     assert_eq!(second.prefix_reused, n_prompt - 1);
 }
 
@@ -123,14 +143,23 @@ fn multi_turn_prefix_reuse_matches_cold_output() {
 
     let turn1 = prompt("Name a colour.");
     let a1 = run_gguf(&engine, &turn1, &cfg);
-    let turn2 = format!("{turn1}{}<|im_end|>\n<|im_start|>user\nName another one.<|im_end|>\n<|im_start|>assistant\n", a1.text);
+    let turn2 = format!(
+        "{turn1}{}<|im_end|>\n<|im_start|>user\nName another one.<|im_end|>\n<|im_start|>assistant\n",
+        a1.text
+    );
     let warm = run_gguf(&engine, &turn2, &cfg);
-    assert!(warm.prefix_reused > 0, "second turn should hit the prefix cache");
+    assert!(
+        warm.prefix_reused > 0,
+        "second turn should hit the prefix cache"
+    );
 
     engine.clear_cache();
     let cold = run_gguf(&engine, &turn2, &cfg);
     assert_eq!(cold.prefix_reused, 0);
-    assert_eq!(warm.text, cold.text, "warm (prefix-reused) and cold outputs must agree");
+    assert_eq!(
+        warm.text, cold.text,
+        "warm (prefix-reused) and cold outputs must agree"
+    );
 }
 
 #[test]
@@ -157,7 +186,8 @@ fn draft_speculative_matches_plain_greedy() {
     let Some(path) = model_path() else { return };
     let draft = draft_path(&path);
     let plain_engine = load_gguf(&path);
-    let spec_engine = SpeculativeEngine::load(&path, &draft, 99, false, KvQuantMode::F16, N_CTX, 4).expect("spec load");
+    let spec_engine = SpeculativeEngine::load(&path, &draft, 99, false, KvQuantMode::F16, N_CTX, 4)
+        .expect("spec load");
     let p = prompt(REPETITIVE);
     let cfg = greedy(96, false);
 
@@ -179,7 +209,11 @@ fn draft_speculative_matches_plain_greedy() {
             .nth(1)
             .and_then(|s| s.trim_end_matches("%)").parse().ok())
             .expect("acceptance in stats label");
-        assert!(acc >= 90.0, "self-draft acceptance was only {acc}% ({})", spec.kv_type);
+        assert!(
+            acc >= 90.0,
+            "self-draft acceptance was only {acc}% ({})",
+            spec.kv_type
+        );
     }
 
     // Second call must reuse both prefix caches and give the same answer
@@ -193,14 +227,23 @@ fn draft_speculative_matches_plain_greedy() {
 fn chat_template_comes_from_model_metadata() {
     let Some(path) = model_path() else { return };
     let engine = load_gguf(&path);
-    let msgs = [ChatMessage::system("S"), ChatMessage::user("U"), ChatMessage::assistant("A"), ChatMessage::user("U2")];
+    let msgs = [
+        ChatMessage::system("S"),
+        ChatMessage::user("U"),
+        ChatMessage::assistant("A"),
+        ChatMessage::user("U2"),
+    ];
     let rendered = engine.format_chat(&msgs);
-    assert!(rendered.ends_with("assistant\n") || rendered.ends_with("assistant\n\n") || rendered.contains("U2"),
-        "rendered prompt should end with an open assistant turn: {rendered:?}");
+    assert!(
+        rendered.ends_with("assistant\n")
+            || rendered.ends_with("assistant\n\n")
+            || rendered.contains("U2"),
+        "rendered prompt should end with an open assistant turn: {rendered:?}"
+    );
     // The Qwen family ships a ChatML template; llama.cpp renders it identically
     // to our fallback. Other families will differ, which is the point.
-    if engine.chat_format_label().starts_with("model template") && rendered.contains("<|im_start|>") {
+    if engine.chat_format_label().starts_with("model template") && rendered.contains("<|im_start|>")
+    {
         assert_eq!(rendered, render_chatml(&msgs));
     }
 }
-

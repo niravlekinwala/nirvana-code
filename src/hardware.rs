@@ -5,7 +5,7 @@
 //! probe runs once per process; every caller on the generation path goes
 //! through the cached copy.
 
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::OnceLock;
 
 #[derive(Debug, Clone)]
@@ -160,7 +160,13 @@ fn sysctl_string(name: &str) -> Option<String> {
     let cname = CString::new(name).ok()?;
     let mut len = 0usize;
     let rc = unsafe {
-        libc::sysctlbyname(cname.as_ptr(), std::ptr::null_mut(), &mut len, std::ptr::null_mut(), 0)
+        libc::sysctlbyname(
+            cname.as_ptr(),
+            std::ptr::null_mut(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
     };
     if rc != 0 || len == 0 {
         return None;
@@ -204,7 +210,11 @@ fn gpu_core_count() -> Option<u32> {
     }
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
-        fn CFStringCreateWithCString(alloc: *const c_void, s: *const c_char, encoding: u32) -> CFStringRef;
+        fn CFStringCreateWithCString(
+            alloc: *const c_void,
+            s: *const c_char,
+            encoding: u32,
+        ) -> CFStringRef;
         fn CFNumberGetValue(number: CFTypeRef, the_type: i64, value_ptr: *mut c_void) -> bool;
         fn CFRelease(cf: CFTypeRef);
     }
@@ -223,11 +233,16 @@ fn gpu_core_count() -> Option<u32> {
             return None;
         }
         let key_c = CString::new("gpu-core-count").ok()?;
-        let key = CFStringCreateWithCString(std::ptr::null(), key_c.as_ptr(), K_CF_STRING_ENCODING_UTF8);
+        let key =
+            CFStringCreateWithCString(std::ptr::null(), key_c.as_ptr(), K_CF_STRING_ENCODING_UTF8);
         let prop = IORegistryEntryCreateCFProperty(service, key, std::ptr::null(), 0);
         let mut cores: i32 = 0;
         let ok = !prop.is_null()
-            && CFNumberGetValue(prop, K_CF_NUMBER_SINT32_TYPE, (&mut cores as *mut i32).cast::<c_void>());
+            && CFNumberGetValue(
+                prop,
+                K_CF_NUMBER_SINT32_TYPE,
+                (&mut cores as *mut i32).cast::<c_void>(),
+            );
         if !prop.is_null() {
             CFRelease(prop);
         }

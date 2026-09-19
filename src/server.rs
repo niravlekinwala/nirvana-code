@@ -1,25 +1,25 @@
 use anyhow::Result;
 use axum::{
+    Json, Router,
     extract::{DefaultBodyLimit, Request, State},
-    http::{header, HeaderValue, StatusCode},
+    http::{HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{
-        sse::{Event, KeepAlive, Sse},
         Html, IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
     },
     routing::{get, post},
-    Json, Router,
 };
-use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc::unbounded_channel;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::attachment::Attachment;
@@ -76,7 +76,9 @@ impl ServerState {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or_default();
-        let n = self.request_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let n = self
+            .request_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         format!("chatcmpl-{nanos:x}-{n}")
     }
 }
@@ -86,17 +88,27 @@ impl ServerState {
 async fn guard(State(state): State<ServerState>, req: Request, next: Next) -> Response {
     let sec = &state.security;
 
-    let host_ok = match req.headers().get(header::HOST).and_then(|h| h.to_str().ok()) {
+    let host_ok = match req
+        .headers()
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+    {
         Some(h) => {
             let bare = h.rsplit_once(':').map(|(name, _)| name).unwrap_or(h);
             let bare = bare.trim_matches(|c| c == '[' || c == ']');
-            sec.allowed_hosts.iter().any(|a| a.eq_ignore_ascii_case(bare))
+            sec.allowed_hosts
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case(bare))
         }
         // HTTP/1.0 or Unix-socket clients may omit it; nothing to rebind there.
         None => true,
     };
     if !host_ok {
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": "Host header not allowed" }))).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "Host header not allowed" })),
+        )
+            .into_response();
     }
 
     if let Some(key) = &sec.api_key {
@@ -404,7 +416,10 @@ pub fn create_router(state: ServerState) -> Router {
         .route("/app.js", get(handle_js))
         .route("/v1/models", get(handle_models))
         .route("/v1/models/load", post(handle_load_model))
-        .route("/v1/context", get(handle_get_context).post(handle_set_context))
+        .route(
+            "/v1/context",
+            get(handle_get_context).post(handle_set_context),
+        )
         .route("/v1/project/scan", post(handle_project_scan))
         .route("/v1/project/file", post(handle_project_file))
         .route("/v1/attachments/process", post(handle_process_attachment))
@@ -421,9 +436,7 @@ pub fn create_router(state: ServerState) -> Router {
     router.with_state(state)
 }
 
-async fn handle_process_attachment(
-    Json(req): Json<ProcessAttachmentRequest>,
-) -> Response {
+async fn handle_process_attachment(Json(req): Json<ProcessAttachmentRequest>) -> Response {
     let filename = req.filename.trim().to_string();
     let data = req.data.trim().to_string();
     if filename.is_empty() || data.is_empty() {
@@ -439,7 +452,11 @@ async fn handle_process_attachment(
     let fname_clone = filename.clone();
     let data_clone = data.clone();
     let process_res = tokio::task::spawn_blocking(move || {
-        if data_clone.starts_with("data:") || (!data_clone.starts_with('/') && !data_clone.starts_with('~') && !data_clone.starts_with('.')) {
+        if data_clone.starts_with("data:")
+            || (!data_clone.starts_with('/')
+                && !data_clone.starts_with('~')
+                && !data_clone.starts_with('.'))
+        {
             Attachment::from_base64(&fname_clone, &data_clone)
                 .or_else(|_| Attachment::from_file(&data_clone))
         } else {
@@ -491,11 +508,20 @@ async fn handle_index() -> Html<&'static str> {
 }
 
 async fn handle_css() -> ([(header::HeaderName, &'static str); 1], &'static str) {
-    ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], include_str!("web/app.css"))
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("web/app.css"),
+    )
 }
 
 async fn handle_js() -> ([(header::HeaderName, &'static str); 1], &'static str) {
-    ([(header::CONTENT_TYPE, "application/javascript; charset=utf-8")], include_str!("web/app.js"))
+    (
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        include_str!("web/app.js"),
+    )
 }
 
 async fn handle_models(State(state): State<ServerState>) -> Json<ModelListResponse> {
@@ -708,7 +734,10 @@ async fn handle_set_context(
 
     match res {
         Ok(_) => {
-            println!("⚡ User-defined Context Window: {} tokens (Model: {})", req.ctx_size, model_name);
+            println!(
+                "⚡ User-defined Context Window: {} tokens (Model: {})",
+                req.ctx_size, model_name
+            );
             Json(serde_json::json!({
                 "status": "ok",
                 "ctx_size": req.ctx_size,
@@ -793,7 +822,11 @@ fn confine_to_workspace(sec: &Security, requested: Option<&str>) -> Result<PathB
         None => workspace.clone(),
         Some(p) => {
             let p = Path::new(p);
-            if p.is_absolute() { p.to_path_buf() } else { workspace.join(p) }
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                workspace.join(p)
+            }
         }
     };
     let canonical = candidate.canonicalize().map_err(|e| {
@@ -806,11 +839,13 @@ fn confine_to_workspace(sec: &Security, requested: Option<&str>) -> Result<PathB
         )
     })?;
     if !canonical.starts_with(workspace) {
-        return Err(Box::new((
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({ "error": "Path is outside the configured workspace." })),
-        )
-            .into_response()));
+        return Err(Box::new(
+            (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({ "error": "Path is outside the configured workspace." })),
+            )
+                .into_response(),
+        ));
     }
     Ok(canonical)
 }
@@ -843,7 +878,9 @@ async fn handle_project_scan(
         "Rust (Cargo)"
     } else if canonical_root.join("package.json").exists() {
         "JavaScript / TypeScript (Node)"
-    } else if canonical_root.join("pyproject.toml").exists() || canonical_root.join("requirements.txt").exists() {
+    } else if canonical_root.join("pyproject.toml").exists()
+        || canonical_root.join("requirements.txt").exists()
+    {
         "Python"
     } else if canonical_root.join("go.mod").exists() {
         "Go"
@@ -923,9 +960,31 @@ fn scan_dir_recursive(root: &Path, current: &Path, depth: usize, out: &mut Vec<P
 
             let is_code = matches!(
                 ext.as_str(),
-                "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "go" | "c" | "cpp" | "h" | "hpp"
-                    | "swift" | "java" | "kt" | "rb" | "php" | "sh" | "zsh" | "html" | "css"
-                    | "json" | "yaml" | "yml" | "toml" | "md" | "sql"
+                "rs" | "py"
+                    | "js"
+                    | "ts"
+                    | "tsx"
+                    | "jsx"
+                    | "go"
+                    | "c"
+                    | "cpp"
+                    | "h"
+                    | "hpp"
+                    | "swift"
+                    | "java"
+                    | "kt"
+                    | "rb"
+                    | "php"
+                    | "sh"
+                    | "zsh"
+                    | "html"
+                    | "css"
+                    | "json"
+                    | "yaml"
+                    | "yml"
+                    | "toml"
+                    | "md"
+                    | "sql"
             );
 
             let size_bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
@@ -1030,7 +1089,9 @@ fn build_chat_messages(
 ) -> Vec<ChatMessage> {
     let mut out = Vec::with_capacity(messages.len() + 1);
 
-    let has_system = messages.iter().any(|m| m.role.eq_ignore_ascii_case("system"));
+    let has_system = messages
+        .iter()
+        .any(|m| m.role.eq_ignore_ascii_case("system"));
     if !has_system {
         out.push(ChatMessage::system(
             "You are Nirvana Code, an ultra-low latency Apple Silicon coding assistant. Provide clean, fast, reliable code.",
@@ -1107,7 +1168,13 @@ async fn handle_chat_completions(
                         let path_clone = new_path.clone();
 
                         let load_res = tokio::task::spawn_blocking(move || {
-                            InferenceEngine::load(&path_clone, gpu_layers, use_mlock, kv_mode, ctx_size)
+                            InferenceEngine::load(
+                                &path_clone,
+                                gpu_layers,
+                                use_mlock,
+                                kv_mode,
+                                ctx_size,
+                            )
                         })
                         .await;
 
@@ -1138,7 +1205,11 @@ async fn handle_chat_completions(
                 let filename = att.filename.clone();
                 let data = data.clone();
                 let parse_res = tokio::task::spawn_blocking(move || {
-                    if data.starts_with("data:") || (!data.starts_with('/') && !data.starts_with('~') && !data.starts_with('.')) {
+                    if data.starts_with("data:")
+                        || (!data.starts_with('/')
+                            && !data.starts_with('~')
+                            && !data.starts_with('.'))
+                    {
                         Attachment::from_base64(&filename, &data)
                             .or_else(|_| Attachment::from_file(&data))
                     } else {
@@ -1187,7 +1258,10 @@ async fn handle_chat_completions(
         let mut active = state.active_cancel.lock().await;
         active.insert(req_id.clone(), cancel.clone());
     }
-    let unregister = UnregisterOnDrop { map: state.active_cancel.clone(), id: req_id.clone() };
+    let unregister = UnregisterOnDrop {
+        map: state.active_cancel.clone(),
+        id: req_id.clone(),
+    };
 
     let cancel_clone = cancel.clone();
     let engine_clone = engine.clone();
@@ -1352,7 +1426,17 @@ pub async fn run_server(
     model_path: PathBuf,
     opts: ServerOptions,
 ) -> Result<()> {
-    let ServerOptions { host, port, socket_path, persist_kv, gpu_layers, use_mlock, kv_mode, ctx_size, security } = opts;
+    let ServerOptions {
+        host,
+        port,
+        socket_path,
+        persist_kv,
+        gpu_layers,
+        use_mlock,
+        kv_mode,
+        ctx_size,
+        security,
+    } = opts;
     let host = host.as_str();
     let inner = Arc::new(RwLock::new(ServerEngineInner {
         engine,
@@ -1382,7 +1466,10 @@ pub async fn run_server(
     println!("   Models API URL:  http://{host}:{port}/v1/models");
     println!("   Switch API URL:  POST http://{host}:{port}/v1/models/load");
     match &security.workspace {
-        Some(w) => println!("   Workspace:       {} (project browsing confined here)", w.display()),
+        Some(w) => println!(
+            "   Workspace:       {} (project browsing confined here)",
+            w.display()
+        ),
         None => println!("   Workspace:       none (project browsing disabled; use --workspace)"),
     }
     match &security.api_key {

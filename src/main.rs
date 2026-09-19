@@ -1,9 +1,9 @@
 mod app;
-mod chat;
-mod config;
 pub mod attachment;
+mod chat;
 mod cli;
 mod clipboard;
+mod config;
 mod engine;
 #[cfg(test)]
 mod engine_tests;
@@ -23,20 +23,19 @@ use app::{App, EngineState};
 use cli::{Cli, Commands};
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers,
-        MouseEventKind,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use engine::{GenerationConfig, InferenceEngine, KvQuantMode, StreamEvent};
-use model_manager::{ModelManager, MODEL_CATALOG};
+use model_manager::{MODEL_CATALOG, ModelManager};
 use palette::PaletteManager;
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 use templates::TEMPLATES;
 use tokio::sync::mpsc::unbounded_channel;
@@ -55,7 +54,12 @@ async fn main() -> Result<()> {
             ModelManager::download_target(target).await?;
             return Ok(());
         }
-        Some(Commands::Bench { num_tokens, runs, json, prompt_tokens }) => {
+        Some(Commands::Bench {
+            num_tokens,
+            runs,
+            json,
+            prompt_tokens,
+        }) => {
             cmd_benchmark(&cli, *num_tokens, *runs, *json, *prompt_tokens).await?;
             return Ok(());
         }
@@ -67,7 +71,11 @@ async fn main() -> Result<()> {
             cmd_serve(&cli, *port, host, socket.as_deref()).await?;
             return Ok(());
         }
-        Some(Commands::Web { port, host, no_open }) => {
+        Some(Commands::Web {
+            port,
+            host,
+            no_open,
+        }) => {
             cmd_web(&cli, *port, host, !*no_open).await?;
             return Ok(());
         }
@@ -103,7 +111,14 @@ async fn main() -> Result<()> {
     println!("   Model:       {}", model_path.display());
     println!("   Backend:     {backend_str}");
     println!("   KV-Cache:    {}", kv_mode.label());
-    println!("   MLock:       {}", if use_mlock { "Enabled (LPDDR5 RAM Pinned)" } else { "Disabled" });
+    println!(
+        "   MLock:       {}",
+        if use_mlock {
+            "Enabled (LPDDR5 RAM Pinned)"
+        } else {
+            "Disabled"
+        }
+    );
     if !is_mlx {
         println!("   Metal GPU:   {} layers offloaded", cli.gpu_layers);
     }
@@ -135,13 +150,24 @@ async fn main() -> Result<()> {
 /// GGUF + draft when `--draft-model` or `--speculative` is given.
 fn load_engine(cli: &Cli, model_path: &Path, kv_mode: KvQuantMode) -> Result<InferenceEngine> {
     engine::set_ubatch(cli.ubatch);
-    let engine = if ModelManager::is_mlx_model(model_path) || !(cli.speculative || cli.draft_model.is_some()) {
-        InferenceEngine::load(model_path, cli.gpu_layers, !cli.no_mlock, kv_mode, cli.ctx_size)?
+    let engine = if ModelManager::is_mlx_model(model_path)
+        || !(cli.speculative || cli.draft_model.is_some())
+    {
+        InferenceEngine::load(
+            model_path,
+            cli.gpu_layers,
+            !cli.no_mlock,
+            kv_mode,
+            cli.ctx_size,
+        )?
     } else {
         let draft_path = ModelManager::resolve_model_path(cli.draft_model.as_deref())
             .or_else(|| ModelManager::resolve_model_path(Some(Path::new("qwen-0.5b"))))
             .context("No draft model found for speculative decoding. Run 'nirvana-code download qwen-0.5b'")?;
-        println!("   Draft model: {} (speculative decoding, K adapts 1–16)", draft_path.display());
+        println!(
+            "   Draft model: {} (speculative decoding, K adapts 1–16)",
+            draft_path.display()
+        );
         InferenceEngine::load_speculative(
             model_path,
             &draft_path,
@@ -186,11 +212,14 @@ fn server_options(
     kv_mode: KvQuantMode,
     web_mode: bool,
 ) -> Result<server::ServerOptions> {
-    let workspace = match &cli.workspace {
-        Some(w) => Some(w.canonicalize().with_context(|| format!("--workspace {}: not a readable directory", w.display()))?),
-        None if web_mode => std::env::current_dir().ok(),
-        None => None,
-    };
+    let workspace =
+        match &cli.workspace {
+            Some(w) => Some(w.canonicalize().with_context(|| {
+                format!("--workspace {}: not a readable directory", w.display())
+            })?),
+            None if web_mode => std::env::current_dir().ok(),
+            None => None,
+        };
 
     let loopback = matches!(host, "127.0.0.1" | "localhost" | "::1");
     let api_key = match (&cli.api_key, loopback) {
@@ -198,12 +227,18 @@ fn server_options(
         (None, true) => None,
         (None, false) => {
             let key = generate_api_key();
-            eprintln!("⚠️  Binding to {host} (not loopback) with no --api-key; generated one for this session.");
+            eprintln!(
+                "⚠️  Binding to {host} (not loopback) with no --api-key; generated one for this session."
+            );
             Some(key)
         }
     };
 
-    let mut allowed_hosts = vec!["localhost".to_string(), "127.0.0.1".to_string(), "::1".to_string()];
+    let mut allowed_hosts = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ];
     if !loopback {
         allowed_hosts.push(host.to_string());
     }
@@ -231,7 +266,9 @@ fn generate_api_key() -> String {
     use std::hash::{BuildHasher, Hasher};
     let mut out = String::with_capacity(40);
     for _ in 0..3 {
-        let v = std::collections::hash_map::RandomState::new().build_hasher().finish();
+        let v = std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish();
         out.push_str(&format!("{v:016x}"));
     }
     format!("nv-{out}")
@@ -257,7 +294,14 @@ fn cmd_list_models() -> Result<()> {
             } else {
                 "[Metal GGUF]"
             };
-            println!("   {:>2}. {:<12} {:<45} {:>8}   {}", i + 1, backend_badge, name, size_str, path.display());
+            println!(
+                "   {:>2}. {:<12} {:<45} {:>8}   {}",
+                i + 1,
+                backend_badge,
+                name,
+                size_str,
+                path.display()
+            );
         }
     }
 
@@ -265,7 +309,11 @@ fn cmd_list_models() -> Result<()> {
     println!("   ─────────────────────────────────────────────────────────────────────────────");
     for meta in MODEL_CATALOG {
         let is_inst = installed.iter().any(|(_, name, _)| name == meta.filename);
-        let status = if is_inst { "✔ INSTALLED" } else { "  AVAILABLE" };
+        let status = if is_inst {
+            "✔ INSTALLED"
+        } else {
+            "  AVAILABLE"
+        };
         println!(
             "   [{}] {:<18} | {:<28} | {:>4.1} GB | {}",
             status, meta.id, meta.category, meta.size_gb, meta.speed_m2_pro
@@ -277,7 +325,13 @@ fn cmd_list_models() -> Result<()> {
     Ok(())
 }
 
-async fn cmd_benchmark(cli: &Cli, num_tokens: usize, runs: usize, json: bool, prompt_tokens: usize) -> Result<()> {
+async fn cmd_benchmark(
+    cli: &Cli,
+    num_tokens: usize,
+    runs: usize,
+    json: bool,
+    prompt_tokens: usize,
+) -> Result<()> {
     let model_path = ModelManager::resolve_model_path(cli.model.as_deref())
         .context("No model found for benchmark. Run 'nirvana-code download qwen-1.5b'")?;
     let kv_mode = cli.kv_mode();
@@ -286,10 +340,16 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize, runs: usize, json: bool, pr
 
     if !json {
         println!("\n⚡ Nirvana Code benchmark");
-        println!("   Chip:        {} ({}P+{}E, {} GPU cores, {} GB)", hw.chip_name, hw.p_cores, hw.e_cores, hw.gpu_cores, hw.memory_gb);
+        println!(
+            "   Chip:        {} ({}P+{}E, {} GPU cores, {} GB)",
+            hw.chip_name, hw.p_cores, hw.e_cores, hw.gpu_cores, hw.memory_gb
+        );
         println!("   Model:       {}", model_path.display());
         println!("   KV-Cache:    {}", kv_mode.label());
-        println!("   Context:     {} tokens · prompt ≈{} tokens · {} output tokens · {} runs", cli.ctx_size, prompt_tokens, num_tokens, runs);
+        println!(
+            "   Context:     {} tokens · prompt ≈{} tokens · {} output tokens · {} runs",
+            cli.ctx_size, prompt_tokens, num_tokens, runs
+        );
         println!();
     }
 
@@ -304,11 +364,15 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize, runs: usize, json: bool, pr
     let system = "You are Nirvana Code, an Apple Silicon coding assistant. Answer with code.";
     let cold_prompt = vec![
         chat::ChatMessage::system(system),
-        chat::ChatMessage::user(format!("Here is some code:\n{body}\nWrite a fast concurrent queue in Rust.")),
+        chat::ChatMessage::user(format!(
+            "Here is some code:\n{body}\nWrite a fast concurrent queue in Rust."
+        )),
     ];
     let warm_prompt = vec![
         chat::ChatMessage::system(system),
-        chat::ChatMessage::user(format!("Here is some code:\n{body}\nExplain how the queue avoids data races.")),
+        chat::ChatMessage::user(format!(
+            "Here is some code:\n{body}\nExplain how the queue avoids data races."
+        )),
     ];
 
     let config = GenerationConfig {
@@ -328,7 +392,11 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize, runs: usize, json: bool, pr
         prefix_reused: usize,
     }
 
-    async fn run_once(engine: &InferenceEngine, msgs: &[chat::ChatMessage], cfg: &GenerationConfig) -> Result<Sample> {
+    async fn run_once(
+        engine: &InferenceEngine,
+        msgs: &[chat::ChatMessage],
+        cfg: &GenerationConfig,
+    ) -> Result<Sample> {
         let (tx, mut rx) = unbounded_channel();
         let eng = engine.clone();
         let msgs = msgs.to_vec();
@@ -342,13 +410,23 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize, runs: usize, json: bool, pr
         let mut out = Sample::default();
         while let Some(ev) = rx.recv().await {
             match ev {
-                StreamEvent::Stats { ttft_ms, tokens_per_sec, prompt_tokens, prefix_tokens_reused, .. } => {
+                StreamEvent::Stats {
+                    ttft_ms,
+                    tokens_per_sec,
+                    prompt_tokens,
+                    prefix_tokens_reused,
+                    ..
+                } => {
                     out.ttft_ms = ttft_ms as f64;
                     out.decode_tps = tokens_per_sec;
                     out.prompt_tokens = prompt_tokens;
                     out.prefix_reused = prefix_tokens_reused;
                     let evaluated = prompt_tokens.saturating_sub(prefix_tokens_reused);
-                    out.prefill_tps = if ttft_ms > 0 { evaluated as f64 / (ttft_ms as f64 / 1000.0) } else { 0.0 };
+                    out.prefill_tps = if ttft_ms > 0 {
+                        evaluated as f64 / (ttft_ms as f64 / 1000.0)
+                    } else {
+                        0.0
+                    };
                 }
                 StreamEvent::Error(e) => anyhow::bail!("benchmark generation failed: {e}"),
                 _ => {}
@@ -363,12 +441,24 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize, runs: usize, json: bool, pr
         }
         v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let n = v.len();
-        if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 }
+        if n % 2 == 1 {
+            v[n / 2]
+        } else {
+            (v[n / 2 - 1] + v[n / 2]) / 2.0
+        }
     }
 
     // Warm-up pass: Metal shader compilation and first-touch page faults
     engine.clear_cache();
-    let _ = run_once(&engine, &cold_prompt, &GenerationConfig { max_tokens: 4, ..config.clone() }).await?;
+    let _ = run_once(
+        &engine,
+        &cold_prompt,
+        &GenerationConfig {
+            max_tokens: 4,
+            ..config.clone()
+        },
+    )
+    .await?;
 
     let mut cold: Vec<Sample> = Vec::with_capacity(runs);
     let mut warm: Vec<Sample> = Vec::with_capacity(runs);
@@ -379,14 +469,20 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize, runs: usize, json: bool, pr
         if !json {
             println!(
                 "   run {:>2}: cold TTFT {:>6.0} ms ({:>6.0} tok/s prefill) · warm TTFT {:>5.0} ms ({} reused) · decode {:>6.1} tok/s",
-                i + 1, c.ttft_ms, c.prefill_tps, w.ttft_ms, w.prefix_reused, c.decode_tps
+                i + 1,
+                c.ttft_ms,
+                c.prefill_tps,
+                w.ttft_ms,
+                w.prefix_reused,
+                c.decode_tps
             );
         }
         cold.push(c);
         warm.push(w);
     }
 
-    let m = |f: &dyn Fn(&Sample) -> f64, v: &[Sample]| median(&mut v.iter().map(f).collect::<Vec<_>>());
+    let m =
+        |f: &dyn Fn(&Sample) -> f64, v: &[Sample]| median(&mut v.iter().map(f).collect::<Vec<_>>());
     let cold_ttft = m(&|s| s.ttft_ms, &cold);
     let warm_ttft = m(&|s| s.ttft_ms, &warm);
     let prefill = m(&|s| s.prefill_tps, &cold);
@@ -421,12 +517,24 @@ async fn cmd_benchmark(cli: &Cli, num_tokens: usize, runs: usize, json: bool, pr
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
-        let reduction = if cold_ttft > 0.0 { (cold_ttft - warm_ttft) / cold_ttft * 100.0 } else { 0.0 };
+        let reduction = if cold_ttft > 0.0 {
+            (cold_ttft - warm_ttft) / cold_ttft * 100.0
+        } else {
+            0.0
+        };
         println!("\n   median of {runs} runs");
-        println!("   prefill:     {prefill:>7.0} tok/s   (cold TTFT {cold_ttft:.0} ms over {n_prompt} prompt tokens)");
-        println!("   warm TTFT:   {warm_ttft:>7.0} ms      ({reused} prefix tokens reused, {reduction:.0}% lower than cold)");
+        println!(
+            "   prefill:     {prefill:>7.0} tok/s   (cold TTFT {cold_ttft:.0} ms over {n_prompt} prompt tokens)"
+        );
+        println!(
+            "   warm TTFT:   {warm_ttft:>7.0} ms      ({reused} prefix tokens reused, {reduction:.0}% lower than cold)"
+        );
         println!("   decode:      {decode:>7.1} tok/s   (warm run {decode_warm:.1})");
-        println!("   backend:     {} · {}", engine.backend_name(), engine.kv_label());
+        println!(
+            "   backend:     {} · {}",
+            engine.backend_name(),
+            engine.kv_label()
+        );
         println!();
     }
 
@@ -520,7 +628,14 @@ async fn cmd_serve(cli: &Cli, port: u16, host: &str, socket: Option<&Path>) -> R
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "nirvana-code".to_string());
 
-    let opts = server_options(cli, host, port, socket.map(|p| p.to_path_buf()), kv_mode, false)?;
+    let opts = server_options(
+        cli,
+        host,
+        port,
+        socket.map(|p| p.to_path_buf()),
+        kv_mode,
+        false,
+    )?;
     server::run_server(engine, model_name, model_path, opts).await?;
     Ok(())
 }
@@ -606,7 +721,11 @@ fn run_tui(
 
     // Restore terminal cleanly
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
 
     if let Err(e) = res {
@@ -640,27 +759,27 @@ fn run_app_loop(
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)? {
             match event::read()? {
-                Event::Mouse(mouse) => {
-                    match mouse.kind {
-                        MouseEventKind::ScrollUp => {
-                            app.auto_scroll = false;
-                            app.scroll_offset = app.scroll_offset.saturating_sub(3);
-                        }
-                        MouseEventKind::ScrollDown => {
-                            app.scroll_offset = (app.scroll_offset + 3).min(app.max_scroll);
-                            if app.scroll_offset >= app.max_scroll {
-                                app.auto_scroll = true;
-                            }
-                        }
-                        _ => {}
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        app.auto_scroll = false;
+                        app.scroll_offset = app.scroll_offset.saturating_sub(3);
                     }
-                }
+                    MouseEventKind::ScrollDown => {
+                        app.scroll_offset = (app.scroll_offset + 3).min(app.max_scroll);
+                        if app.scroll_offset >= app.max_scroll {
+                            app.auto_scroll = true;
+                        }
+                    }
+                    _ => {}
+                },
                 Event::Key(key) => {
                     if key.kind == event::KeyEventKind::Press {
                         // 1. Exit Confirmation Modal intercept
                         if app.exit_confirmation {
                             match key.code {
-                                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                KeyCode::Char('c')
+                                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                                {
                                     return Ok(());
                                 }
                                 KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -681,7 +800,9 @@ fn run_app_loop(
                                 KeyCode::Esc => {
                                     app.show_model_picker = false;
                                 }
-                                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                KeyCode::Char('c')
+                                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                                {
                                     app.show_model_picker = false;
                                 }
                                 KeyCode::Up => {
@@ -690,12 +811,16 @@ fn run_app_loop(
                                     }
                                 }
                                 KeyCode::Down => {
-                                    if !app.installed_models.is_empty() && app.model_picker_index + 1 < app.installed_models.len() {
+                                    if !app.installed_models.is_empty()
+                                        && app.model_picker_index + 1 < app.installed_models.len()
+                                    {
                                         app.model_picker_index += 1;
                                     }
                                 }
                                 KeyCode::Enter => {
-                                    if let Some((path, _, _)) = app.installed_models.get(app.model_picker_index) {
+                                    if let Some((path, _, _)) =
+                                        app.installed_models.get(app.model_picker_index)
+                                    {
                                         let p = path.clone();
                                         let _ = app.switch_model(p);
                                     }
@@ -722,7 +847,9 @@ fn run_app_loop(
                                 KeyCode::Esc => {
                                     app.close_attach_modal();
                                 }
-                                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                KeyCode::Char('c')
+                                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                                {
                                     app.close_attach_modal();
                                 }
                                 KeyCode::Enter => {
@@ -751,7 +878,9 @@ fn run_app_loop(
                                 KeyCode::Esc => {
                                     app.show_palette = false;
                                 }
-                                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                KeyCode::Char('c')
+                                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                                {
                                     app.show_palette = false;
                                 }
                                 KeyCode::Up => {
@@ -760,15 +889,21 @@ fn run_app_loop(
                                     }
                                 }
                                 KeyCode::Down => {
-                                    let filtered =
-                                        PaletteManager::filter_items(&app.palette_items, &app.palette_query);
-                                    if !filtered.is_empty() && app.palette_index + 1 < filtered.len() {
+                                    let filtered = PaletteManager::filter_items(
+                                        &app.palette_items,
+                                        &app.palette_query,
+                                    );
+                                    if !filtered.is_empty()
+                                        && app.palette_index + 1 < filtered.len()
+                                    {
                                         app.palette_index += 1;
                                     }
                                 }
                                 KeyCode::Enter => {
-                                    let filtered =
-                                        PaletteManager::filter_items(&app.palette_items, &app.palette_query);
+                                    let filtered = PaletteManager::filter_items(
+                                        &app.palette_items,
+                                        &app.palette_query,
+                                    );
                                     if let Some(item) = filtered.get(app.palette_index) {
                                         let action = item.action.clone();
                                         app.execute_palette_action(action);
@@ -851,7 +986,8 @@ fn run_app_loop(
                                     if app.current_attachment.is_some() {
                                         app.detach_file();
                                     } else {
-                                        app.scroll_offset = (app.scroll_offset + 10).min(app.max_scroll);
+                                        app.scroll_offset =
+                                            (app.scroll_offset + 10).min(app.max_scroll);
                                         if app.scroll_offset >= app.max_scroll {
                                             app.auto_scroll = true;
                                         }
@@ -875,7 +1011,9 @@ fn run_app_loop(
                         }
 
                         // 4. Shift & Alt scrolling shortcuts
-                        if key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::ALT) {
+                        if key.modifiers.contains(KeyModifiers::SHIFT)
+                            || key.modifiers.contains(KeyModifiers::ALT)
+                        {
                             match key.code {
                                 KeyCode::Up => {
                                     app.auto_scroll = false;
@@ -934,7 +1072,9 @@ fn run_app_loop(
                                 }
                             }
                             KeyCode::Down => {
-                                if (!app.auto_scroll || is_input_empty) && app.scroll_offset < app.max_scroll {
+                                if (!app.auto_scroll || is_input_empty)
+                                    && app.scroll_offset < app.max_scroll
+                                {
                                     app.scroll_offset = (app.scroll_offset + 3).min(app.max_scroll);
                                     if app.scroll_offset >= app.max_scroll {
                                         app.auto_scroll = true;

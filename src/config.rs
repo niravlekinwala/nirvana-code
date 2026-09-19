@@ -141,7 +141,8 @@ impl FileConfig {
 /// Parse the command line and layer the config file underneath it.
 pub fn parse_cli() -> Cli {
     let matches = Cli::command().get_matches();
-    let mut cli = <Cli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    let mut cli =
+        <Cli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     if let Some((_, cfg)) = FileConfig::load() {
         cfg.apply(&mut cli, &matches);
     }

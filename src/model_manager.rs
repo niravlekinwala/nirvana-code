@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs::{self, File};
@@ -49,7 +49,6 @@ pub const MODEL_CATALOG: &[ModelMeta] = &[
         speed_m2_pro: "~35-45 tok/s",
         description: "35B Mixture-of-Experts activating only 3B parameters per token for high-speed agentic coding.",
     },
-
     // 7B - 12B Mid-Tier Champions (Best for 16GB RAM + 32K Context)
     ModelMeta {
         id: "qwen-3.5-9b",
@@ -81,8 +80,17 @@ pub const MODEL_CATALOG: &[ModelMeta] = &[
         speed_m2_pro: "~65-75 tok/s",
         description: "Highly responsive architecture for chained tool calling and on-device assistant workflows.",
     },
-
     // Compact Fast Models (1B - 3B)
+    ModelMeta {
+        id: "qwen-coder-7b",
+        name: "Qwen 2.5 Coder 7B Instruct (Q4_K_M)",
+        filename: "qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+        url: "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+        size_gb: 4.7,
+        category: "Coding Flagship for 16GB (Speculative Target)",
+        speed_m2_pro: "~30 tok/s (faster with --draft-model qwen-0.5b)",
+        description: "Strong coding model that shares a tokenizer with the 0.5B draft, making it the natural target for speculative decoding.",
+    },
     ModelMeta {
         id: "qwen-coder-3b",
         name: "Qwen 2.5 Coder 3B Instruct",
@@ -301,7 +309,12 @@ impl ModelManager {
                         continue;
                     }
 
-                    if path.extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("gguf")).unwrap_or(false) {
+                    if path
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.eq_ignore_ascii_case("gguf"))
+                        .unwrap_or(false)
+                    {
                         let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
                         if !seen.contains(&canon) {
                             seen.insert(canon);
@@ -341,11 +354,17 @@ impl ModelManager {
         if let Some((p, _, _)) = installed.iter().find(|(_, name, _)| name == target) {
             return Some(p.clone());
         }
-        if let Some((p, _, _)) = installed.iter().find(|(_, name, _)| name.to_lowercase().contains(&lower)) {
+        if let Some((p, _, _)) = installed
+            .iter()
+            .find(|(_, name, _)| name.to_lowercase().contains(&lower))
+        {
             return Some(p.clone());
         }
         if let Some(meta) = MODEL_CATALOG.iter().find(|m| m.id == target) {
-            return installed.iter().find(|(_, name, _)| name == meta.filename).map(|(p, _, _)| p.clone());
+            return installed
+                .iter()
+                .find(|(_, name, _)| name == meta.filename)
+                .map(|(p, _, _)| p.clone());
         }
         None
     }
@@ -418,7 +437,9 @@ impl ModelManager {
 
         for id in preferred_ids {
             if let Some(meta) = MODEL_CATALOG.iter().find(|m| m.id == id) {
-                if let Some((path, _, _)) = installed.iter().find(|(_, name, _)| name == meta.filename) {
+                if let Some((path, _, _)) =
+                    installed.iter().find(|(_, name, _)| name == meta.filename)
+                {
                     return Some(path.clone());
                 }
             }
@@ -483,9 +504,16 @@ impl ModelManager {
             .redirect(reqwest::redirect::Policy::none())
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
-        let head = probe.head(url).send().await.context("Failed to reach download URL")?;
+        let head = probe
+            .head(url)
+            .send()
+            .await
+            .context("Failed to reach download URL")?;
         if !(head.status().is_success() || head.status().is_redirection()) {
-            bail!("Download request failed with HTTP status: {}", head.status());
+            bail!(
+                "Download request failed with HTTP status: {}",
+                head.status()
+            );
         }
         let expected_sha = head
             .headers()
@@ -501,7 +529,10 @@ impl ModelManager {
         if resume_from > 0 {
             req = req.header("Range", format!("bytes={resume_from}-"));
         }
-        let res = req.send().await.context("Failed to initiate download stream")?;
+        let res = req
+            .send()
+            .await
+            .context("Failed to initiate download stream")?;
         let status = res.status();
         if resume_from > 0 && status != reqwest::StatusCode::PARTIAL_CONTENT {
             // Server ignored the range: start over
@@ -556,7 +587,9 @@ impl ModelManager {
             let actual = format!("{:x}", hasher.finalize());
             if actual != expected {
                 let _ = fs::remove_file(&temp_path);
-                bail!("SHA-256 mismatch for {filename}: expected {expected}, got {actual}. The partial file was removed; run the download again.");
+                bail!(
+                    "SHA-256 mismatch for {filename}: expected {expected}, got {actual}. The partial file was removed; run the download again."
+                );
             }
             println!("   SHA-256:  {actual} ✔");
         } else {
@@ -596,7 +629,10 @@ mod tests {
         if let Some(lm_dir) = ModelManager::lmstudio_dir() {
             if lm_dir.exists() {
                 let has_lmstudio = installed.iter().any(|(p, _, _)| p.starts_with(&lm_dir));
-                assert!(has_lmstudio, "Expected installed models to include LM Studio models");
+                assert!(
+                    has_lmstudio,
+                    "Expected installed models to include LM Studio models"
+                );
             }
         }
     }

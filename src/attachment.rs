@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use base64::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -42,12 +42,10 @@ impl AttachmentType {
                 Self::Image
             }
             "docx" | "doc" | "rtf" | "odt" | "html" | "htm" => Self::Document,
-            "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "go" | "c" | "cpp" | "h" | "hpp"
-            | "cs" | "java" | "kt" | "swift" | "rb" | "php" | "sh" | "zsh" | "bash" | "sql"
-            | "json" | "yaml" | "yml" | "toml" | "xml" | "csv" | "tsv" | "css" | "scss"
-            | "vue" | "svelte" | "lua" | "zig" | "scala" | "r" | "dart" | "m" | "mm" => {
-                Self::Code
-            }
+            "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "go" | "c" | "cpp" | "h" | "hpp" | "cs"
+            | "java" | "kt" | "swift" | "rb" | "php" | "sh" | "zsh" | "bash" | "sql" | "json"
+            | "yaml" | "yml" | "toml" | "xml" | "csv" | "tsv" | "css" | "scss" | "vue"
+            | "svelte" | "lua" | "zig" | "scala" | "r" | "dart" | "m" | "mm" => Self::Code,
             _ => Self::Text,
         }
     }
@@ -83,10 +81,7 @@ impl Attachment {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "attachment".to_string());
 
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         let file_type = AttachmentType::from_extension(ext);
         let size_str = format_size(size_bytes);
@@ -94,7 +89,12 @@ impl Attachment {
         let (metadata_summary, extracted_text) = match file_type {
             AttachmentType::Pdf => {
                 let (pages, text) = extract_pdf(&path)?;
-                let meta = format!("{} • {} page{}", size_str, pages, if pages == 1 { "" } else { "s" });
+                let meta = format!(
+                    "{} • {} page{}",
+                    size_str,
+                    pages,
+                    if pages == 1 { "" } else { "s" }
+                );
                 (meta, text)
             }
             AttachmentType::Image => {
@@ -153,7 +153,13 @@ impl Attachment {
 
         let mut sanitized_name = filename
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect::<String>();
 
         // Infer extension if missing from filename
@@ -162,7 +168,9 @@ impl Attachment {
                 sanitized_name.push_str(".pdf");
             } else if base64_payload.starts_with("data:image/png") {
                 sanitized_name.push_str(".png");
-            } else if base64_payload.starts_with("data:image/jpeg") || base64_payload.starts_with("data:image/jpg") {
+            } else if base64_payload.starts_with("data:image/jpeg")
+                || base64_payload.starts_with("data:image/jpg")
+            {
                 sanitized_name.push_str(".jpg");
             } else if base64_payload.starts_with("data:image/webp") {
                 sanitized_name.push_str(".webp");
@@ -286,9 +294,15 @@ fn helper_path() -> Option<PathBuf> {
     PATH.get_or_init(|| {
         let dir = dirs::home_dir()?.join(".nirvana").join("bin");
         fs::create_dir_all(&dir).ok()?;
-        let name = format!("nirvana-extract-{}-{}", env!("CARGO_PKG_VERSION"), EXTRACT_HELPER.len());
+        let name = format!(
+            "nirvana-extract-{}-{}",
+            env!("CARGO_PKG_VERSION"),
+            EXTRACT_HELPER.len()
+        );
         let path = dir.join(name);
-        let up_to_date = fs::metadata(&path).map(|m| m.len() as usize == EXTRACT_HELPER.len()).unwrap_or(false);
+        let up_to_date = fs::metadata(&path)
+            .map(|m| m.len() as usize == EXTRACT_HELPER.len())
+            .unwrap_or(false);
         if !up_to_date {
             let tmp = path.with_extension("tmp");
             fs::write(&tmp, EXTRACT_HELPER).ok()?;
@@ -305,11 +319,14 @@ fn helper_path() -> Option<PathBuf> {
 
 fn run_helper(mode: &str, path: &Path) -> Option<std::process::Output> {
     let helper = helper_path()?;
-    Command::new(helper).arg(mode).arg(path.as_os_str()).output().ok()
+    Command::new(helper)
+        .arg(mode)
+        .arg(path.as_os_str())
+        .output()
+        .ok()
 }
 
 fn extract_pdf(path: &Path) -> Result<(usize, String)> {
-
     match run_helper("pdf", path) {
         Some(out) if out.status.success() => {
             let text_out = String::from_utf8_lossy(&out.stdout).to_string();
@@ -330,7 +347,9 @@ fn extract_pdf(path: &Path) -> Result<(usize, String)> {
             }
 
             if content.is_empty() {
-                content = "(PDF contains 0 extracted text characters. Scanned document or vector paths.)".to_string();
+                content =
+                    "(PDF contains 0 extracted text characters. Scanned document or vector paths.)"
+                        .to_string();
             }
 
             Ok((pages, content))
@@ -350,7 +369,11 @@ fn extract_pdf(path: &Path) -> Result<(usize, String)> {
                 extracted.truncate(2000);
             }
             let msg = if extracted.is_empty() {
-                format!("(PDF document '{}', {} bytes)", path.display(), raw_bytes.len())
+                format!(
+                    "(PDF document '{}', {} bytes)",
+                    path.display(),
+                    raw_bytes.len()
+                )
             } else {
                 format!("(PDF stream extract):\n{extracted}")
             };
@@ -432,7 +455,8 @@ fn extract_document(path: &Path) -> Result<String> {
 }
 
 fn extract_code_or_text(path: &Path) -> Result<String> {
-    let bytes = fs::read(path).with_context(|| format!("Failed to read file: {}", path.display()))?;
+    let bytes =
+        fs::read(path).with_context(|| format!("Failed to read file: {}", path.display()))?;
     let text = String::from_utf8_lossy(&bytes).to_string();
     if text.chars().count() > 25000 {
         let truncated: String = text.chars().take(25000).collect();
@@ -489,13 +513,18 @@ mod tests {
     #[test]
     fn test_attachment_pdf_extraction() {
         // Any text PDF works: NIRVANA_TEST_PDF=/path/to/file.pdf cargo test
-        let Some(pdf_path) = std::env::var_os("NIRVANA_TEST_PDF").map(PathBuf::from) else { return };
+        let Some(pdf_path) = std::env::var_os("NIRVANA_TEST_PDF").map(PathBuf::from) else {
+            return;
+        };
         if pdf_path.exists() {
             let att = Attachment::from_file(&pdf_path).unwrap();
             assert_eq!(att.file_type, AttachmentType::Pdf);
-            assert!(att.metadata_summary.contains("page"), "{}", att.metadata_summary);
+            assert!(
+                att.metadata_summary.contains("page"),
+                "{}",
+                att.metadata_summary
+            );
             assert!(!att.extracted_text.is_empty());
         }
     }
 }
-

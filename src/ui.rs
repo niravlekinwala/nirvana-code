@@ -2,14 +2,14 @@ use crate::app::{App, AppMode, EngineState};
 use crate::model_manager::MODEL_CATALOG;
 use crate::palette::PaletteManager;
 use crate::syntax::SyntaxHighlighter;
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Scrollbar,
-    ScrollbarOrientation, ScrollbarState, Wrap,
+    Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, Wrap,
 };
-use ratatui::Frame;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let size = f.area();
@@ -80,8 +80,11 @@ fn draw_header_hud(f: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
     ];
-    let title_p = Paragraph::new(Line::from(title_spans))
-        .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(app.theme.border_dim)));
+    let title_p = Paragraph::new(Line::from(title_spans)).block(
+        Block::default()
+            .borders(Borders::BOTTOM)
+            .border_style(Style::default().fg(app.theme.border_dim)),
+    );
     f.render_widget(title_p, header_chunks[0]);
 
     // 2. Silicon Badges (KV Cache Quant, mlock, Prefix Cache)
@@ -97,10 +100,7 @@ fn draw_header_hud(f: &mut Frame, app: &App, area: Rect) {
             app.theme.badge_style(),
         ),
         Span::raw(" "),
-        Span::styled(
-            " MLOCK: LOCKED ",
-            app.theme.green_badge(),
-        ),
+        Span::styled(" MLOCK: LOCKED ", app.theme.green_badge()),
         Span::raw(" "),
         Span::styled(
             format!(" {prefix_text} "),
@@ -113,7 +113,11 @@ fn draw_header_hud(f: &mut Frame, app: &App, area: Rect) {
     ];
     let badges_p = Paragraph::new(Line::from(badges))
         .alignment(Alignment::Center)
-        .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(app.theme.border_dim)));
+        .block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(app.theme.border_dim)),
+        );
     f.render_widget(badges_p, header_chunks[1]);
 
     // 3. Live Silicon Performance Metrics
@@ -128,16 +132,33 @@ fn draw_header_hud(f: &mut Frame, app: &App, area: Rect) {
 
     let perf_spans = vec![
         Span::styled("TTFT: ", Style::default().fg(app.theme.text_muted)),
-        Span::styled(ttft_str, Style::default().fg(app.theme.neon_amber).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            ttft_str,
+            Style::default()
+                .fg(app.theme.neon_amber)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("  "),
         Span::styled("Speed: ", Style::default().fg(app.theme.text_muted)),
-        Span::styled(tps_str, Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            tps_str,
+            Style::default()
+                .fg(app.theme.neon_cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("  "),
-        Span::styled(format!("Tokens: {} ", app.current_tokens), Style::default().fg(app.theme.text_bright)),
+        Span::styled(
+            format!("Tokens: {} ", app.current_tokens),
+            Style::default().fg(app.theme.text_bright),
+        ),
     ];
     let perf_p = Paragraph::new(Line::from(perf_spans))
         .alignment(Alignment::Right)
-        .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(app.theme.border_dim)));
+        .block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(app.theme.border_dim)),
+        );
     f.render_widget(perf_p, header_chunks[2]);
 }
 
@@ -174,14 +195,18 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                 AppMode::PromptCraft => "Prompt Optimization",
                 AppMode::SiliconHUD => "Silicon Telemetry",
             },
-            Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(app.theme.neon_cyan)
+                .add_modifier(Modifier::BOLD),
         ),
     ])];
     mode_lines.push(Line::from(vec![
         Span::styled("Target: ", Style::default().fg(app.theme.text_muted)),
         Span::styled(
             app.active_template.target_model,
-            Style::default().fg(app.theme.neon_magenta).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(app.theme.neon_magenta)
+                .add_modifier(Modifier::BOLD),
         ),
     ]));
     mode_lines.push(Line::from(vec![
@@ -194,13 +219,29 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     mode_lines.push(Line::from(""));
     mode_lines.push(Line::from(vec![
         Span::styled("Press ", Style::default().fg(app.theme.text_muted)),
-        Span::styled("Ctrl+P", Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(" to Switch Model", Style::default().fg(app.theme.text_muted)),
+        Span::styled(
+            "Ctrl+P",
+            Style::default()
+                .fg(app.theme.neon_cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            " to Switch Model",
+            Style::default().fg(app.theme.text_muted),
+        ),
     ]));
     mode_lines.push(Line::from(vec![
         Span::styled("Press ", Style::default().fg(app.theme.text_muted)),
-        Span::styled("Ctrl+K", Style::default().fg(app.theme.neon_amber).add_modifier(Modifier::BOLD)),
-        Span::styled(" for Command Palette", Style::default().fg(app.theme.text_muted)),
+        Span::styled(
+            "Ctrl+K",
+            Style::default()
+                .fg(app.theme.neon_amber)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            " for Command Palette",
+            Style::default().fg(app.theme.text_muted),
+        ),
     ]));
 
     let mode_block = Block::default()
@@ -210,7 +251,10 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(app.theme.border_dim))
         .style(Style::default().bg(app.theme.bg_card));
-    f.render_widget(Paragraph::new(mode_lines).block(mode_block), sidebar_chunks[0]);
+    f.render_widget(
+        Paragraph::new(mode_lines).block(mode_block),
+        sidebar_chunks[0],
+    );
 
     // 2. Hardware Specs Card
     let offloaded = app.engine.offloaded_layers();
@@ -218,26 +262,38 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     let hw_lines = vec![
         Line::from(vec![
             Span::styled("Chip: ", Style::default().fg(app.theme.text_muted)),
-            Span::styled(&app.hardware.chip_name, Style::default().fg(app.theme.text_bright).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                &app.hardware.chip_name,
+                Style::default()
+                    .fg(app.theme.text_bright)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(vec![
             Span::styled("GPU: ", Style::default().fg(app.theme.text_muted)),
             Span::styled(
                 format!("MTL0 ({} GPU cores)", app.hardware.gpu_cores),
-                Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(app.theme.neon_cyan)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
             Span::styled("Engine: ", Style::default().fg(app.theme.text_muted)),
             Span::styled(
                 format!("{}/{} ({})", offloaded, total, app.engine.backend_name()),
-                Style::default().fg(app.theme.neon_green).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(app.theme.neon_green)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
             Span::styled("Memory: ", Style::default().fg(app.theme.text_muted)),
             Span::styled(
-                format!("{} GB ({} GB/s Unified)", app.hardware.memory_gb, app.hardware.memory_bandwidth_gbps),
+                format!(
+                    "{} GB ({} GB/s Unified)",
+                    app.hardware.memory_gb, app.hardware.memory_bandwidth_gbps
+                ),
                 Style::default().fg(app.theme.neon_green),
             ),
         ]),
@@ -245,7 +301,9 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("KV Cache: ", Style::default().fg(app.theme.text_muted)),
             Span::styled(
                 app.engine.kv_label(),
-                Style::default().fg(app.theme.neon_amber).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(app.theme.neon_amber)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
@@ -266,10 +324,15 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     // 3. AtomicChat 16GB Guide Models Vault
     let mut catalog_items = Vec::new();
     for meta in MODEL_CATALOG {
-        let is_installed = app.installed_models.iter().any(|(_, name, _)| name == meta.filename);
+        let is_installed = app
+            .installed_models
+            .iter()
+            .any(|(_, name, _)| name == meta.filename);
         let status_icon = if is_installed { "✔" } else { "☁" };
         let status_style = if is_installed {
-            Style::default().fg(app.theme.neon_green).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(app.theme.neon_green)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(app.theme.text_muted)
         };
@@ -277,25 +340,33 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
         catalog_items.push(ListItem::new(vec![
             Line::from(vec![
                 Span::styled(format!("{status_icon} "), status_style),
-                Span::styled(meta.id, Style::default().fg(app.theme.text_bright).add_modifier(Modifier::BOLD)),
-                Span::styled(format!(" ({:.1}G)", meta.size_gb), Style::default().fg(app.theme.text_muted)),
+                Span::styled(
+                    meta.id,
+                    Style::default()
+                        .fg(app.theme.text_bright)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" ({:.1}G)", meta.size_gb),
+                    Style::default().fg(app.theme.text_muted),
+                ),
             ]),
-            Line::from(vec![
-                Span::styled(format!("   {}", meta.category), Style::default().fg(app.theme.neon_cyan)),
-            ]),
+            Line::from(vec![Span::styled(
+                format!("   {}", meta.category),
+                Style::default().fg(app.theme.neon_cyan),
+            )]),
         ]));
     }
 
-    let catalog_list = List::new(catalog_items)
-        .block(
-            Block::default()
-                .title(" Model Vault (16GB Guide) ")
-                .title_style(app.theme.title_style())
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(app.theme.border_dim))
-                .style(Style::default().bg(app.theme.bg_card)),
-        );
+    let catalog_list = List::new(catalog_items).block(
+        Block::default()
+            .title(" Model Vault (16GB Guide) ")
+            .title_style(app.theme.title_style())
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(app.theme.border_dim))
+            .style(Style::default().bg(app.theme.bg_card)),
+    );
     f.render_widget(catalog_list, sidebar_chunks[2]);
 }
 
@@ -329,42 +400,98 @@ fn draw_content_pane(f: &mut Frame, app: &mut App, area: Rect) {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled(" ⚡ Welcome to ", Style::default().fg(app.theme.text_dim)),
-            Span::styled("Nirvana Code (v2)", Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD)),
-            Span::styled(" - Next-Gen Apple Silicon Assistant", Style::default().fg(app.theme.text_dim)),
+            Span::styled(
+                "Nirvana Code (v2)",
+                Style::default()
+                    .fg(app.theme.neon_cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " - Next-Gen Apple Silicon Assistant",
+                Style::default().fg(app.theme.text_dim),
+            ),
         ]));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("  • ", Style::default().fg(app.theme.neon_green)),
-            Span::styled("High-Throughput KV-Cache: ", Style::default().fg(app.theme.text_bright).add_modifier(Modifier::BOLD)),
-            Span::styled("F16 active for maximum Metal 3 memory bandwidth & 120+ tok/s decode speed.", Style::default().fg(app.theme.text_dim)),
+            Span::styled(
+                "High-Throughput KV-Cache: ",
+                Style::default()
+                    .fg(app.theme.text_bright)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "F16 active for maximum Metal 3 memory bandwidth & 120+ tok/s decode speed.",
+                Style::default().fg(app.theme.text_dim),
+            ),
         ]));
         lines.push(Line::from(vec![
             Span::styled("  • ", Style::default().fg(app.theme.neon_green)),
-            Span::styled("Prefix State Reuse: ", Style::default().fg(app.theme.text_bright).add_modifier(Modifier::BOLD)),
-            Span::styled("Cached system prompt yields sub-30ms Time-To-First-Token (TTFT).", Style::default().fg(app.theme.text_dim)),
+            Span::styled(
+                "Prefix State Reuse: ",
+                Style::default()
+                    .fg(app.theme.text_bright)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Cached system prompt yields sub-30ms Time-To-First-Token (TTFT).",
+                Style::default().fg(app.theme.text_dim),
+            ),
         ]));
         lines.push(Line::from(vec![
             Span::styled("  • ", Style::default().fg(app.theme.neon_green)),
-            Span::styled("Unified RAM Pinning: ", Style::default().fg(app.theme.text_bright).add_modifier(Modifier::BOLD)),
-            Span::styled("mlock locks model weights in physical LPDDR5 RAM (zero paging).", Style::default().fg(app.theme.text_dim)),
+            Span::styled(
+                "Unified RAM Pinning: ",
+                Style::default()
+                    .fg(app.theme.text_bright)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "mlock locks model weights in physical LPDDR5 RAM (zero paging).",
+                Style::default().fg(app.theme.text_dim),
+            ),
         ]));
         lines.push(Line::from(vec![
             Span::styled("  • ", Style::default().fg(app.theme.neon_green)),
-            Span::styled("Speculative Verification: ", Style::default().fg(app.theme.text_bright).add_modifier(Modifier::BOLD)),
-            Span::styled("Fast draft verification pipeline with KV rollback.", Style::default().fg(app.theme.text_dim)),
+            Span::styled(
+                "Speculative Verification: ",
+                Style::default()
+                    .fg(app.theme.text_bright)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Fast draft verification pipeline with KV rollback.",
+                Style::default().fg(app.theme.text_dim),
+            ),
         ]));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("  Type your prompt below or press ", Style::default().fg(app.theme.text_muted)),
-            Span::styled("Ctrl+K", Style::default().fg(app.theme.neon_amber).add_modifier(Modifier::BOLD)),
-            Span::styled(" to select templates or switch models.", Style::default().fg(app.theme.text_muted)),
+            Span::styled(
+                "  Type your prompt below or press ",
+                Style::default().fg(app.theme.text_muted),
+            ),
+            Span::styled(
+                "Ctrl+K",
+                Style::default()
+                    .fg(app.theme.neon_amber)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " to select templates or switch models.",
+                Style::default().fg(app.theme.text_muted),
+            ),
         ]));
     } else {
         // Render history items
         for msg in &app.chat_history {
             if msg.role == "user" {
                 lines.push(Line::from(vec![
-                    Span::styled("USER > ", Style::default().fg(app.theme.neon_magenta).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "USER > ",
+                        Style::default()
+                            .fg(app.theme.neon_magenta)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(&msg.content, Style::default().fg(app.theme.text_bright)),
                 ]));
                 lines.push(Line::from(""));
@@ -380,9 +507,12 @@ fn draw_content_pane(f: &mut Frame, app: &mut App, area: Rect) {
                     msg.tps.unwrap_or(0.0),
                     prefix_badge
                 );
-                lines.push(Line::from(vec![
-                    Span::styled(stat_header, Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD)),
-                ]));
+                lines.push(Line::from(vec![Span::styled(
+                    stat_header,
+                    Style::default()
+                        .fg(app.theme.neon_cyan)
+                        .add_modifier(Modifier::BOLD),
+                )]));
                 lines.extend(SyntaxHighlighter::render_markdown_lines(&msg.content));
                 lines.push(Line::from(""));
             }
@@ -396,10 +526,15 @@ fn draw_content_pane(f: &mut Frame, app: &mut App, area: Rect) {
                 "".to_string()
             };
             let live_header = format!("NIRVANA GENERATING...{prefix_badge}");
-            lines.push(Line::from(vec![
-                Span::styled(live_header, Style::default().fg(app.theme.neon_green).add_modifier(Modifier::BOLD)),
-            ]));
-            lines.extend(SyntaxHighlighter::render_markdown_lines(&app.current_stream));
+            lines.push(Line::from(vec![Span::styled(
+                live_header,
+                Style::default()
+                    .fg(app.theme.neon_green)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+            lines.extend(SyntaxHighlighter::render_markdown_lines(
+                &app.current_stream,
+            ));
         }
     }
 
@@ -426,14 +561,28 @@ fn draw_content_pane(f: &mut Frame, app: &mut App, area: Rect) {
         } else {
             100
         };
-        format!(" [▲ SCROLL {}% ({}/{}) | Press End to follow] ", pct, app.scroll_offset, app.max_scroll)
+        format!(
+            " [▲ SCROLL {}% ({}/{}) | Press End to follow] ",
+            pct, app.scroll_offset, app.max_scroll
+        )
     };
 
     let title_line = Line::from(vec![
-        Span::styled(" Terminal Workspace ", Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " Terminal Workspace ",
+            Style::default()
+                .fg(app.theme.neon_cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             scroll_info,
-            Style::default().fg(if app.auto_scroll { app.theme.neon_green } else { app.theme.neon_amber }).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(if app.auto_scroll {
+                    app.theme.neon_green
+                } else {
+                    app.theme.neon_amber
+                })
+                .add_modifier(Modifier::BOLD),
         ),
     ]);
 
@@ -452,8 +601,8 @@ fn draw_content_pane(f: &mut Frame, app: &mut App, area: Rect) {
 
     // Render interactive visual scrollbar on the right edge of workspace
     if app.max_scroll > 0 {
-        let mut scrollbar_state = ScrollbarState::new(app.max_scroll as usize)
-            .position(app.scroll_offset as usize);
+        let mut scrollbar_state =
+            ScrollbarState::new(app.max_scroll as usize).position(app.scroll_offset as usize);
         let scrollbar = Scrollbar::default()
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("▲"))
@@ -477,14 +626,28 @@ fn draw_content_pane(f: &mut Frame, app: &mut App, area: Rect) {
                 .border_style(Style::default().fg(app.theme.neon_cyan))
                 .style(Style::default().bg(app.theme.bg_card));
 
-            let att_lines = vec![
-                Line::from(vec![
-                    Span::styled(format!(" {} ATTACHED: ", att.file_type.icon()), Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD)),
-                    Span::styled(&att.filename, Style::default().fg(app.theme.text_bright).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("  [{}]  ", att.metadata_summary), Style::default().fg(app.theme.neon_green)),
-                    Span::styled(" (Ctrl+D or /detach to remove) ", Style::default().fg(app.theme.text_muted)),
-                ]),
-            ];
+            let att_lines = vec![Line::from(vec![
+                Span::styled(
+                    format!(" {} ATTACHED: ", att.file_type.icon()),
+                    Style::default()
+                        .fg(app.theme.neon_cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    &att.filename,
+                    Style::default()
+                        .fg(app.theme.text_bright)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  [{}]  ", att.metadata_summary),
+                    Style::default().fg(app.theme.neon_green),
+                ),
+                Span::styled(
+                    " (Ctrl+D or /detach to remove) ",
+                    Style::default().fg(app.theme.text_muted),
+                ),
+            ])];
             let p = Paragraph::new(att_lines).block(att_block);
             f.render_widget(p, att_area);
         }
@@ -506,7 +669,11 @@ fn draw_content_pane(f: &mut Frame, app: &mut App, area: Rect) {
 
     let input_block = Block::default()
         .title(input_title)
-        .title_style(Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD))
+        .title_style(
+            Style::default()
+                .fg(app.theme.neon_cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(input_border_style)
@@ -517,28 +684,72 @@ fn draw_content_pane(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_footer_status(f: &mut Frame, app: &App, area: Rect) {
-    let toast = app.toast_message.as_ref().map(|(msg, _)| msg.as_str()).unwrap_or("");
+    let toast = app
+        .toast_message
+        .as_ref()
+        .map(|(msg, _)| msg.as_str())
+        .unwrap_or("");
 
     let footer_line = Line::from(vec![
-        Span::styled(" [Enter] ", Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " [Enter] ",
+            Style::default()
+                .fg(app.theme.neon_cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("Send  ", Style::default().fg(app.theme.text_dim)),
-        Span::styled("[Ctrl+F] ", Style::default().fg(app.theme.neon_green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[Ctrl+F] ",
+            Style::default()
+                .fg(app.theme.neon_green)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("Attach  ", Style::default().fg(app.theme.text_dim)),
         Span::styled("[Shift+Enter] ", Style::default().fg(app.theme.neon_cyan)),
         Span::styled("Newline  ", Style::default().fg(app.theme.text_dim)),
-        Span::styled("[↑/↓ or Scroll] ", Style::default().fg(app.theme.neon_green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[↑/↓ or Scroll] ",
+            Style::default()
+                .fg(app.theme.neon_green)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("History  ", Style::default().fg(app.theme.text_dim)),
-        Span::styled("[Ctrl+P] ", Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[Ctrl+P] ",
+            Style::default()
+                .fg(app.theme.neon_cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("Model  ", Style::default().fg(app.theme.text_dim)),
-        Span::styled("[Ctrl+O] ", Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[Ctrl+O] ",
+            Style::default()
+                .fg(app.theme.neon_cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("Copy All  ", Style::default().fg(app.theme.text_dim)),
-        Span::styled("[Ctrl+Y] ", Style::default().fg(app.theme.neon_amber).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[Ctrl+Y] ",
+            Style::default()
+                .fg(app.theme.neon_amber)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("Copy Code  ", Style::default().fg(app.theme.text_dim)),
-        Span::styled("[Ctrl+K] ", Style::default().fg(app.theme.neon_magenta).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[Ctrl+K] ",
+            Style::default()
+                .fg(app.theme.neon_magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("Palette  ", Style::default().fg(app.theme.text_dim)),
         Span::styled("[Ctrl+C] ", Style::default().fg(app.theme.text_muted)),
         Span::styled("Exit  ", Style::default().fg(app.theme.text_dim)),
-        Span::styled(format!("   {toast}"), Style::default().fg(app.theme.neon_green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("   {toast}"),
+            Style::default()
+                .fg(app.theme.neon_green)
+                .add_modifier(Modifier::BOLD),
+        ),
     ]);
 
     let footer_p = Paragraph::new(footer_line).style(Style::default().bg(app.theme.bg_card));
@@ -563,7 +774,12 @@ fn draw_command_palette(f: &mut Frame, app: &App, area: Rect) {
     // Search query box
     let query_line = Line::from(vec![
         Span::styled(" 🔍 ", Style::default().fg(app.theme.neon_cyan)),
-        Span::styled(&app.palette_query, Style::default().fg(app.theme.text_bright).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            &app.palette_query,
+            Style::default()
+                .fg(app.theme.text_bright)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("█", Style::default().fg(app.theme.neon_cyan)),
     ]);
     let query_p = Paragraph::new(query_line).block(
@@ -586,7 +802,9 @@ fn draw_command_palette(f: &mut Frame, app: &App, area: Rect) {
         let prefix = if is_selected { "▶ " } else { "  " };
 
         let title_style = if is_selected {
-            Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(app.theme.neon_cyan)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(app.theme.text_bright)
         };
@@ -641,18 +859,44 @@ fn draw_exit_confirmation_modal(f: &mut Frame, app: &App, area: Rect) {
     let content = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("   Are you sure you want to quit ", Style::default().fg(app.theme.text_bright)),
-            Span::styled("Nirvana Code", Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "   Are you sure you want to quit ",
+                Style::default().fg(app.theme.text_bright),
+            ),
+            Span::styled(
+                "Nirvana Code",
+                Style::default()
+                    .fg(app.theme.neon_cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("?", Style::default().fg(app.theme.text_bright)),
         ]),
         Line::from(""),
         Line::from(vec![
             Span::styled("   Press ", Style::default().fg(app.theme.text_muted)),
-            Span::styled("[Ctrl+C]", Style::default().fg(app.theme.neon_magenta).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[Ctrl+C]",
+                Style::default()
+                    .fg(app.theme.neon_magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" or ", Style::default().fg(app.theme.text_muted)),
-            Span::styled("[Y]", Style::default().fg(app.theme.neon_magenta).add_modifier(Modifier::BOLD)),
-            Span::styled(" to exit  •  Press ", Style::default().fg(app.theme.text_muted)),
-            Span::styled("[Esc]", Style::default().fg(app.theme.neon_green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "[Y]",
+                Style::default()
+                    .fg(app.theme.neon_magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " to exit  •  Press ",
+                Style::default().fg(app.theme.text_muted),
+            ),
+            Span::styled(
+                "[Esc]",
+                Style::default()
+                    .fg(app.theme.neon_green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" to cancel", Style::default().fg(app.theme.text_muted)),
         ]),
     ];
@@ -812,20 +1056,29 @@ fn draw_attach_modal(f: &mut Frame, app: &App, area: Rect) {
         ])
         .split(inner_area);
 
-    let instr = Paragraph::new(Line::from(vec![
-        Span::styled("Enter path, paste clipboard, or drag & drop file into terminal:", Style::default().fg(app.theme.text_bright)),
-    ]));
+    let instr = Paragraph::new(Line::from(vec![Span::styled(
+        "Enter path, paste clipboard, or drag & drop file into terminal:",
+        Style::default().fg(app.theme.text_bright),
+    )]));
     f.render_widget(instr, chunks[0]);
 
     // Input box
     let input_display = if app.attach_input.is_empty() {
         Line::from(vec![
-            Span::styled("e.g. ~/Downloads/report.pdf or /path/to/image.png", Style::default().fg(app.theme.text_dim)),
+            Span::styled(
+                "e.g. ~/Downloads/report.pdf or /path/to/image.png",
+                Style::default().fg(app.theme.text_dim),
+            ),
             Span::styled("█", Style::default().fg(app.theme.neon_cyan)),
         ])
     } else {
         Line::from(vec![
-            Span::styled(&app.attach_input, Style::default().fg(app.theme.neon_cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                &app.attach_input,
+                Style::default()
+                    .fg(app.theme.neon_cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("█", Style::default().fg(app.theme.neon_cyan)),
         ])
     };
@@ -837,23 +1090,37 @@ fn draw_attach_modal(f: &mut Frame, app: &App, area: Rect) {
     let input_p = Paragraph::new(input_display).block(input_block);
     f.render_widget(input_p, chunks[1]);
 
-    let types_desc = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled("Apple Silicon Accelerators: ", Style::default().fg(app.theme.neon_green).add_modifier(Modifier::BOLD)),
-            Span::styled("PDFKit text (.pdf)  •  Vision OCR (.png,.jpg)  •  textutil (.docx,.rtf)", Style::default().fg(app.theme.text_muted)),
-        ]),
-    ]);
+    let types_desc = Paragraph::new(vec![Line::from(vec![
+        Span::styled(
+            "Apple Silicon Accelerators: ",
+            Style::default()
+                .fg(app.theme.neon_green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "PDFKit text (.pdf)  •  Vision OCR (.png,.jpg)  •  textutil (.docx,.rtf)",
+            Style::default().fg(app.theme.text_muted),
+        ),
+    ])]);
     f.render_widget(types_desc, chunks[2]);
 
     let footer_hint = Line::from(vec![
-        Span::styled(" [Enter] ", Style::default().fg(app.theme.neon_green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " [Enter] ",
+            Style::default()
+                .fg(app.theme.neon_green)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("Attach File  ", Style::default().fg(app.theme.text_dim)),
         Span::styled("[Esc] ", Style::default().fg(app.theme.text_muted)),
         Span::styled("Cancel  ", Style::default().fg(app.theme.text_dim)),
         Span::styled("[/detach] ", Style::default().fg(app.theme.neon_amber)),
         Span::styled("Remove attachment", Style::default().fg(app.theme.text_dim)),
     ]);
-    f.render_widget(Paragraph::new(footer_hint).alignment(Alignment::Center), chunks[3]);
+    f.render_widget(
+        Paragraph::new(footer_hint).alignment(Alignment::Center),
+        chunks[3],
+    );
 }
 
 fn calculate_visual_lines(lines: &[Line], width: usize) -> usize {

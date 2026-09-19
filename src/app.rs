@@ -9,9 +9,9 @@ use crate::templates::{PromptTemplate, TEMPLATES};
 use crate::theme::Theme;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tui_textarea::TextArea;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,10 +199,14 @@ impl<'a> App<'a> {
                 "/model" | "/switch" | "/load" => {
                     if parts.len() > 1 {
                         let target = parts[1..].join(" ");
-                        if let Some(path) = ModelManager::resolve_model_path(Some(Path::new(&target))) {
+                        if let Some(path) =
+                            ModelManager::resolve_model_path(Some(Path::new(&target)))
+                        {
                             let _ = self.switch_model(path);
                         } else {
-                            self.set_toast(&format!("❌ Model '{target}' not found. Type /model to see list."));
+                            self.set_toast(&format!(
+                                "❌ Model '{target}' not found. Type /model to see list."
+                            ));
                         }
                     } else {
                         self.open_model_picker();
@@ -215,7 +219,11 @@ impl<'a> App<'a> {
                 }
                 "/sidebar" => {
                     self.show_sidebar = !self.show_sidebar;
-                    self.set_toast(if self.show_sidebar { "✔ Sidebar visible" } else { "✔ Sidebar hidden (Full Workspace)" });
+                    self.set_toast(if self.show_sidebar {
+                        "✔ Sidebar visible"
+                    } else {
+                        "✔ Sidebar hidden (Full Workspace)"
+                    });
                     return;
                 }
                 "/clear" => {
@@ -245,18 +253,25 @@ impl<'a> App<'a> {
         }
 
         // Prepare prompt and display text (incorporating attachment if present)
-        let (display_content, engine_prompt_content) = if let Some(att) = self.current_attachment.take() {
-            let user_note = if input_text.is_empty() {
-                format!("Analyze attached {}", att.filename)
+        let (display_content, engine_prompt_content) =
+            if let Some(att) = self.current_attachment.take() {
+                let user_note = if input_text.is_empty() {
+                    format!("Analyze attached {}", att.filename)
+                } else {
+                    input_text.clone()
+                };
+                let formatted_engine = att.format_prompt(&input_text);
+                let display = format!(
+                    "📎 [{} : {} ({})]\n{}",
+                    att.file_type.label(),
+                    att.filename,
+                    att.metadata_summary,
+                    user_note
+                );
+                (display, formatted_engine)
             } else {
-                input_text.clone()
+                (input_text.clone(), input_text.clone())
             };
-            let formatted_engine = att.format_prompt(&input_text);
-            let display = format!("📎 [{} : {} ({})]\n{}", att.file_type.label(), att.filename, att.metadata_summary, user_note);
-            (display, formatted_engine)
-        } else {
-            (input_text.clone(), input_text.clone())
-        };
 
         // Add user message to history
         self.chat_history.push(ChatMessage {
@@ -272,7 +287,9 @@ impl<'a> App<'a> {
         // Build the conversation; the engine renders it with the model's template
         let messages: Vec<crate::chat::ChatMessage> = match self.mode {
             AppMode::Chat => {
-                let mut msgs = vec![crate::chat::ChatMessage::system(self.active_template.system_prompt)];
+                let mut msgs = vec![crate::chat::ChatMessage::system(
+                    self.active_template.system_prompt,
+                )];
                 let history_len = self.chat_history.len();
                 for (i, msg) in self.chat_history.iter().enumerate() {
                     let text = if i + 1 == history_len && msg.role == "user" {
@@ -280,7 +297,10 @@ impl<'a> App<'a> {
                     } else {
                         &msg.content
                     };
-                    msgs.push(crate::chat::ChatMessage::new(msg.role.clone(), text.clone()));
+                    msgs.push(crate::chat::ChatMessage::new(
+                        msg.role.clone(),
+                        text.clone(),
+                    ));
                 }
                 msgs
             }
@@ -381,7 +401,12 @@ impl<'a> App<'a> {
     pub fn copy_last_response(&mut self) {
         let text_to_copy = if !self.current_stream.is_empty() {
             &self.current_stream
-        } else if let Some(msg) = self.chat_history.iter().rev().find(|m| m.role == "assistant") {
+        } else if let Some(msg) = self
+            .chat_history
+            .iter()
+            .rev()
+            .find(|m| m.role == "assistant")
+        {
             &msg.content
         } else {
             self.set_toast("No response to copy");
@@ -398,7 +423,12 @@ impl<'a> App<'a> {
     pub fn copy_first_code_snippet(&mut self) {
         let content = if !self.current_stream.is_empty() {
             &self.current_stream
-        } else if let Some(msg) = self.chat_history.iter().rev().find(|m| m.role == "assistant") {
+        } else if let Some(msg) = self
+            .chat_history
+            .iter()
+            .rev()
+            .find(|m| m.role == "assistant")
+        {
             &msg.content
         } else {
             self.set_toast("No code snippet available");
@@ -430,7 +460,10 @@ impl<'a> App<'a> {
             }
         }
         if !self.current_stream.is_empty() {
-            full_text.push_str(&format!("### ASSISTANT (streaming)\n{}\n\n", self.current_stream));
+            full_text.push_str(&format!(
+                "### ASSISTANT (streaming)\n{}\n\n",
+                self.current_stream
+            ));
         }
 
         if ClipboardHelper::copy_text(full_text.trim()).is_ok() {
@@ -553,7 +586,12 @@ impl<'a> App<'a> {
 
     pub fn attach_file(&mut self, path_str: &str) -> Result<()> {
         let att = Attachment::from_file(path_str)?;
-        let summary = format!("📎 Attached {}: {} ({})", att.file_type.label(), att.filename, att.metadata_summary);
+        let summary = format!(
+            "📎 Attached {}: {} ({})",
+            att.file_type.label(),
+            att.filename,
+            att.metadata_summary
+        );
         self.current_attachment = Some(att);
         self.set_toast(&summary);
         Ok(())
@@ -569,7 +607,11 @@ impl<'a> App<'a> {
 
     pub fn open_model_picker(&mut self) {
         self.installed_models = ModelManager::list_installed();
-        if let Some(idx) = self.installed_models.iter().position(|(p, _, _)| *p == self.model_path) {
+        if let Some(idx) = self
+            .installed_models
+            .iter()
+            .position(|(p, _, _)| *p == self.model_path)
+        {
             self.model_picker_index = idx;
         } else {
             self.model_picker_index = 0;
@@ -582,7 +624,13 @@ impl<'a> App<'a> {
             let is_active = *path == self.model_path;
             let size_mb = size / (1024 * 1024);
             let active_str = if is_active { "  ● [ACTIVE]" } else { "" };
-            list_msg.push_str(&format!("  [{}] {} ({} MB){}\n", i + 1, name, size_mb, active_str));
+            list_msg.push_str(&format!(
+                "  [{}] {} ({} MB){}\n",
+                i + 1,
+                name,
+                size_mb,
+                active_str
+            ));
         }
         list_msg.push_str("\nSelect in the popup dialog above, or type /model <1..N|name>");
 

@@ -1,6 +1,6 @@
-use anyhow::{bail, Result};
-use llama_cpp_2::context::params::{KvCacheType, LlamaContextParams};
+use anyhow::{Result, bail};
 use llama_cpp_2::context::LlamaContext;
+use llama_cpp_2::context::params::{KvCacheType, LlamaContextParams};
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
@@ -15,10 +15,10 @@ use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::chat::{ChatMessage, ChatRenderer};
-use crate::speculative::SpeculativeEngine;
 use crate::hardware::SiliconProfile;
 use crate::mlx_engine::MlxEngine;
 use crate::model_manager::ModelManager;
+use crate::speculative::SpeculativeEngine;
 
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
@@ -111,7 +111,9 @@ impl GenerationConfig {
     fn resolve_seed(&self) -> u32 {
         self.seed.unwrap_or_else(|| {
             use std::hash::{BuildHasher, Hasher};
-            std::collections::hash_map::RandomState::new().build_hasher().finish() as u32
+            std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish() as u32
         })
     }
 }
@@ -269,7 +271,13 @@ pub(crate) fn ngram_draft(
     if len < n + 1 {
         return None;
     }
-    let at = |i: usize| if i < history.len() { history[i] } else { pending };
+    let at = |i: usize| {
+        if i < history.len() {
+            history[i]
+        } else {
+            pending
+        }
+    };
     let query_start = len - n;
     for i in (0..query_start).rev() {
         if (0..n).all(|j| at(i + j) == at(query_start + j)) {
@@ -376,7 +384,10 @@ pub(crate) fn load_model_fitted(
     n_ctx: u32,
 ) -> Result<LlamaModel> {
     if n_gpu_layers >= 99 {
-        if let Some(cpath) = model_path.to_str().and_then(|s| std::ffi::CString::new(s).ok()) {
+        if let Some(cpath) = model_path
+            .to_str()
+            .and_then(|s| std::ffi::CString::new(s).ok())
+        {
             let mut params = Box::pin(LlamaModelParams::default().with_use_mlock(use_mlock));
             let mut cparams = LlamaContextParams::default()
                 .with_n_ctx(NonZeroU32::new(n_ctx))
@@ -388,7 +399,10 @@ pub(crate) fn load_model_fitted(
             } else {
                 llama_cpp_sys_2::GGML_LOG_LEVEL_ERROR
             };
-            match params.as_mut().fit_params(&cpath, &mut cparams, &mut margins, 512, log_level) {
+            match params
+                .as_mut()
+                .fit_params(&cpath, &mut cparams, &mut margins, 512, log_level)
+            {
                 Ok(_) => {
                     let overrides = params.tensor_buft_override_patterns();
                     // -1 means "all layers"; anything else means the fitter cut back
@@ -396,13 +410,19 @@ pub(crate) fn load_model_fitted(
                         eprintln!(
                             "   Memory:      auto-fit → {} GPU layers{}",
                             params.n_gpu_layers(),
-                            if overrides.is_empty() { String::new() } else { format!(", {} tensors on CPU", overrides.len()) }
+                            if overrides.is_empty() {
+                                String::new()
+                            } else {
+                                format!(", {} tensors on CPU", overrides.len())
+                            }
                         );
                     }
                     return Ok(LlamaModel::load_from_file(backend, model_path, &params)?);
                 }
                 Err(_) => {
-                    eprintln!("   Memory:      auto-fit found no allocation that fits; loading anyway");
+                    eprintln!(
+                        "   Memory:      auto-fit found no allocation that fits; loading anyway"
+                    );
                 }
             }
         }
@@ -542,15 +562,23 @@ impl ModelEngine {
     pub fn session_path(&self) -> Option<PathBuf> {
         let stem = self.model_path.file_stem()?.to_string_lossy().to_string();
         let dir = dirs::home_dir()?.join(".nirvana").join("kv");
-        Some(dir.join(format!("{stem}-{}-{:?}.bin", self.n_ctx.load(Ordering::Relaxed), self.kv_mode)))
+        Some(dir.join(format!(
+            "{stem}-{}-{:?}.bin",
+            self.n_ctx.load(Ordering::Relaxed),
+            self.kv_mode
+        )))
     }
 
     /// Persist the first `SESSION_MAX_TOKENS` tokens of the KV state so the
     /// next process starts with the system prompt already evaluated.
     pub fn save_session(&self) -> Result<usize> {
-        let Some(path) = self.session_path() else { return Ok(0) };
+        let Some(path) = self.session_path() else {
+            return Ok(0);
+        };
         let mut ctx_guard = self.context.lock().unwrap();
-        let Some(ctx) = ctx_guard.as_mut() else { return Ok(0) };
+        let Some(ctx) = ctx_guard.as_mut() else {
+            return Ok(0);
+        };
         let mut cache = self.cached_tokens.lock().unwrap();
         if cache.tokens.is_empty() {
             return Ok(0);
@@ -569,7 +597,9 @@ impl ModelEngine {
 
     /// Restore a persisted prefix; returns how many tokens are now warm.
     pub fn load_session(&self) -> Result<usize> {
-        let Some(path) = self.session_path() else { return Ok(0) };
+        let Some(path) = self.session_path() else {
+            return Ok(0);
+        };
         if !path.exists() {
             return Ok(0);
         }
@@ -606,7 +636,9 @@ impl ModelEngine {
         tx: UnboundedSender<StreamEvent>,
     ) -> Result<()> {
         let n_ctx = self.n_ctx.load(Ordering::Relaxed) as usize;
-        let prompt = self.chat.render_fitting(&self.model, messages, n_ctx, config.max_tokens);
+        let prompt = self
+            .chat
+            .render_fitting(&self.model, messages, n_ctx, config.max_tokens);
         self.stream_generate_with_config(&prompt, config, cancel_token, tx)
     }
 
@@ -690,7 +722,8 @@ impl ModelEngine {
             let tail_len = safe_prompt_limit.saturating_sub(head_len);
             let mut truncated = Vec::with_capacity(safe_prompt_limit);
             truncated.extend_from_slice(&prompt_tokens[..head_len]);
-            truncated.extend_from_slice(&prompt_tokens[prompt_tokens.len().saturating_sub(tail_len)..]);
+            truncated
+                .extend_from_slice(&prompt_tokens[prompt_tokens.len().saturating_sub(tail_len)..]);
             truncated
         } else {
             prompt_tokens
@@ -719,7 +752,13 @@ impl ModelEngine {
 
         let batch_size = (n_batch as usize).min(512);
         let mut batch = LlamaBatch::new(batch_size, 1);
-        if !cache.prefill(ctx, &mut batch, &prompt_tokens[prefix_tokens_reused..], batch_size, &cancel_token)? {
+        if !cache.prefill(
+            ctx,
+            &mut batch,
+            &prompt_tokens[prefix_tokens_reused..],
+            batch_size,
+            &cancel_token,
+        )? {
             let _ = tx.send(StreamEvent::Done);
             return Ok(());
         }
@@ -739,7 +778,10 @@ impl ModelEngine {
 
         let first_token_time = Some(Instant::now());
         total_generated += 1;
-        if let Ok(piece) = self.model.token_to_piece(current_token, &mut decoder, false, None) {
+        if let Ok(piece) = self
+            .model
+            .token_to_piece(current_token, &mut decoder, false, None)
+        {
             if !piece.is_empty() {
                 let _ = tx.send(StreamEvent::Token(piece));
             }
@@ -765,7 +807,12 @@ impl ModelEngine {
                 let drop = (n_ctx_val / 4).max(64) as usize;
                 if n_past > keep + drop {
                     let _ = ctx.kv_cache_seq_rm(0, Some(keep as u32), Some((keep + drop) as u32));
-                    let _ = ctx.kv_cache_seq_add(0, Some((keep + drop) as u32), Some(n_past as u32), -(drop as i32));
+                    let _ = ctx.kv_cache_seq_add(
+                        0,
+                        Some((keep + drop) as u32),
+                        Some(n_past as u32),
+                        -(drop as i32),
+                    );
                     cache.tokens.drain(keep..keep + drop);
                 }
             }
@@ -773,7 +820,12 @@ impl ModelEngine {
 
             let cands = if config.use_ngram_speculative {
                 ngram_draft(&cache.tokens, current_token, NGRAM_LEN, NGRAM_DRAFT).or_else(|| {
-                    ngram_draft(&cache.tokens, current_token, NGRAM_LEN_FALLBACK, NGRAM_DRAFT_FALLBACK)
+                    ngram_draft(
+                        &cache.tokens,
+                        current_token,
+                        NGRAM_LEN_FALLBACK,
+                        NGRAM_DRAFT_FALLBACK,
+                    )
                 })
             } else {
                 None
@@ -801,7 +853,10 @@ impl ModelEngine {
                     if i < cands.len() && next_token == cands[i] {
                         cache.tokens.push(cands[i]);
                         total_generated += 1;
-                        if let Ok(piece) = self.model.token_to_piece(cands[i], &mut decoder, false, None) {
+                        if let Ok(piece) =
+                            self.model
+                                .token_to_piece(cands[i], &mut decoder, false, None)
+                        {
                             if !piece.is_empty() {
                                 let _ = tx.send(StreamEvent::Token(piece));
                             }
@@ -827,7 +882,10 @@ impl ModelEngine {
                 // The target's own sample is always a real output token
                 current_token = next_token;
                 total_generated += 1;
-                if let Ok(piece) = self.model.token_to_piece(current_token, &mut decoder, false, None) {
+                if let Ok(piece) =
+                    self.model
+                        .token_to_piece(current_token, &mut decoder, false, None)
+                {
                     if !piece.is_empty() {
                         let _ = tx.send(StreamEvent::Token(piece));
                     }
@@ -845,7 +903,10 @@ impl ModelEngine {
                 }
 
                 total_generated += 1;
-                if let Ok(piece) = self.model.token_to_piece(current_token, &mut decoder, false, None) {
+                if let Ok(piece) =
+                    self.model
+                        .token_to_piece(current_token, &mut decoder, false, None)
+                {
                     if !piece.is_empty() {
                         let _ = tx.send(StreamEvent::Token(piece));
                     }
@@ -921,7 +982,9 @@ impl InferenceEngine {
         ctx_size: u32,
         n_draft: usize,
     ) -> Result<Self> {
-        let spec = SpeculativeEngine::load(model_path, draft_path, gpu_layers, use_mlock, kv_mode, ctx_size, n_draft)?;
+        let spec = SpeculativeEngine::load(
+            model_path, draft_path, gpu_layers, use_mlock, kv_mode, ctx_size, n_draft,
+        )?;
         Ok(InferenceEngine::Speculative(Arc::new(spec)))
     }
 
@@ -936,8 +999,12 @@ impl InferenceEngine {
         tx: UnboundedSender<StreamEvent>,
     ) -> Result<()> {
         match self {
-            InferenceEngine::Gguf(e) => e.stream_generate_with_config(prompt, config, cancel_token, tx),
-            InferenceEngine::Mlx(e) => e.stream_generate_with_config(prompt, config, cancel_token, tx),
+            InferenceEngine::Gguf(e) => {
+                e.stream_generate_with_config(prompt, config, cancel_token, tx)
+            }
+            InferenceEngine::Mlx(e) => {
+                e.stream_generate_with_config(prompt, config, cancel_token, tx)
+            }
             InferenceEngine::Speculative(e) => e.stream_generate(prompt, config, cancel_token, tx),
         }
     }
@@ -1067,7 +1134,6 @@ impl InferenceEngine {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1078,7 +1144,10 @@ mod tests {
 
     #[test]
     fn prefix_partial_match() {
-        assert_eq!(reusable_prefix_len(&t(&[1, 2, 3, 4]), &t(&[1, 2, 9, 9, 9])), 2);
+        assert_eq!(
+            reusable_prefix_len(&t(&[1, 2, 3, 4]), &t(&[1, 2, 9, 9, 9])),
+            2
+        );
     }
 
     #[test]
