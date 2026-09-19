@@ -13,7 +13,7 @@ class NirvanaCode < Formula
   on_macos do
     on_arm do
       url "https://github.com/niravlekinwala/nirvana-code/releases/download/v#{version}/nirvana-code-#{version}-aarch64-apple-darwin.tar.gz"
-      sha256 "REPLACE_WITH_SHA256_FROM_RELEASE"
+      sha256 "7e6a30293795bec77e0c91ed342da27cd8176c612bfca07aa9f84e1c57a3f2c3"
     end
   end
 
