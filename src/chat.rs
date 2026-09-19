@@ -15,7 +15,10 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
-        Self { role: role.into(), content: content.into() }
+        Self {
+            role: role.into(),
+            content: content.into(),
+        }
     }
     pub fn system(content: impl Into<String>) -> Self {
         Self::new("system", content)
@@ -69,9 +72,15 @@ fn jinja_env(source: &str) -> Result<minijinja::Environment<'static>, minijinja:
     // HF templates lean on Python string methods (.strip(), .startswith()…)
     env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
     minijinja_contrib::add_to_environment(&mut env);
-    env.add_function("raise_exception", |msg: String| -> Result<(), minijinja::Error> {
-        Err(minijinja::Error::new(minijinja::ErrorKind::InvalidOperation, msg))
-    });
+    env.add_function(
+        "raise_exception",
+        |msg: String| -> Result<(), minijinja::Error> {
+            Err(minijinja::Error::new(
+                minijinja::ErrorKind::InvalidOperation,
+                msg,
+            ))
+        },
+    );
     env.add_template_owned(TEMPLATE_NAME, source.to_string())?;
     Ok(env)
 }
@@ -86,12 +95,13 @@ fn jinja_render(
         .iter()
         .map(|m| minijinja::context! { role => m.role, content => m.content })
         .collect();
-    env.get_template(TEMPLATE_NAME)?.render(minijinja::context! {
-        messages => msgs,
-        add_generation_prompt => true,
-        bos_token => bos_token,
-        eos_token => eos_token,
-    })
+    env.get_template(TEMPLATE_NAME)?
+        .render(minijinja::context! {
+            messages => msgs,
+            add_generation_prompt => true,
+            bos_token => bos_token,
+            eos_token => eos_token,
+        })
 }
 
 impl ChatFormat {
@@ -107,7 +117,11 @@ impl ChatFormat {
                 let bos_token = special_token_text(model, model.token_bos());
                 let eos_token = special_token_text(model, model.token_eos());
                 if jinja_render(&env, &probe, &bos_token, &eos_token).is_ok() {
-                    return ChatFormat::Jinja { env: Box::new(env), bos_token, eos_token };
+                    return ChatFormat::Jinja {
+                        env: Box::new(env),
+                        bos_token,
+                        eos_token,
+                    };
                 }
             }
         }
@@ -117,7 +131,10 @@ impl ChatFormat {
             .iter()
             .filter_map(|m| LlamaChatMessage::new(m.role.clone(), m.content.clone()).ok())
             .collect();
-        if model.apply_chat_template(&tmpl, &native_probe, true).is_ok() {
+        if model
+            .apply_chat_template(&tmpl, &native_probe, true)
+            .is_ok()
+        {
             return ChatFormat::Native(tmpl);
         }
 
@@ -133,11 +150,18 @@ impl ChatFormat {
     }
 
     /// Render `messages` followed by an open assistant turn.
-    pub fn render(&self, model: &LlamaModel, messages: &[ChatMessage], strip_bos: Option<&str>) -> String {
+    pub fn render(
+        &self,
+        model: &LlamaModel,
+        messages: &[ChatMessage],
+        strip_bos: Option<&str>,
+    ) -> String {
         let rendered = match self {
-            ChatFormat::Jinja { env, bos_token, eos_token } => {
-                jinja_render(env, messages, bos_token, eos_token).ok()
-            }
+            ChatFormat::Jinja {
+                env,
+                bos_token,
+                eos_token,
+            } => jinja_render(env, messages, bos_token, eos_token).ok(),
             ChatFormat::Native(tmpl) => {
                 let chat: Vec<LlamaChatMessage> = messages
                     .iter()
@@ -182,7 +206,10 @@ impl ChatRenderer {
             .and_then(|bos| model.token_to_piece_bytes(bos, 64, true, None).ok())
             .map(|b| String::from_utf8_lossy(&b).into_owned())
             .filter(|s| !s.is_empty());
-        Self { format: ChatFormat::detect(model), bos_text }
+        Self {
+            format: ChatFormat::detect(model),
+            bos_text,
+        }
     }
 
     pub fn label(&self) -> &'static str {
@@ -190,7 +217,8 @@ impl ChatRenderer {
     }
 
     pub fn render(&self, model: &LlamaModel, messages: &[ChatMessage]) -> String {
-        self.format.render(model, messages, self.bos_text.as_deref())
+        self.format
+            .render(model, messages, self.bos_text.as_deref())
     }
 
     /// Render, dropping the oldest turns until the prompt leaves room for
@@ -253,9 +281,19 @@ mod tests {
             ChatMessage::user("u2"),
         ];
         assert!(drop_oldest_turn(&mut msgs));
-        assert_eq!(msgs, vec![ChatMessage::system("S"), ChatMessage::assistant("a1"), ChatMessage::user("u2")]);
+        assert_eq!(
+            msgs,
+            vec![
+                ChatMessage::system("S"),
+                ChatMessage::assistant("a1"),
+                ChatMessage::user("u2")
+            ]
+        );
         assert!(drop_oldest_turn(&mut msgs));
-        assert_eq!(msgs, vec![ChatMessage::system("S"), ChatMessage::user("u2")]);
+        assert_eq!(
+            msgs,
+            vec![ChatMessage::system("S"), ChatMessage::user("u2")]
+        );
         assert!(!drop_oldest_turn(&mut msgs));
     }
 }

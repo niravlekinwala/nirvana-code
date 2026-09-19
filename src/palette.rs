@@ -31,7 +31,8 @@ impl PaletteManager {
         // 1. Actions & Controls
         let mut items = vec![PaletteItem {
             title: "Attach File (PDF, Image, Doc, Code)".to_string(),
-            subtitle: "Attach local PDF, screenshot, doc, or code file [Ctrl+F or /attach]".to_string(),
+            subtitle: "Attach local PDF, screenshot, doc, or code file [Ctrl+F or /attach]"
+                .to_string(),
             category: "Input",
             action: PaletteAction::AttachFile,
         }];
@@ -59,14 +60,16 @@ impl PaletteManager {
 
         items.push(PaletteItem {
             title: "Copy Full Assistant Response".to_string(),
-            subtitle: "Copy the entire recent generated response to system clipboard [Ctrl+O]".to_string(),
+            subtitle: "Copy the entire recent generated response to system clipboard [Ctrl+O]"
+                .to_string(),
             category: "Controls",
             action: PaletteAction::CopyLastResponse,
         });
 
         items.push(PaletteItem {
             title: "Copy Full Conversation History".to_string(),
-            subtitle: "Copy entire multi-turn conversation and code to system clipboard".to_string(),
+            subtitle: "Copy entire multi-turn conversation and code to system clipboard"
+                .to_string(),
             category: "Controls",
             action: PaletteAction::CopyFullConversation,
         });
@@ -102,7 +105,8 @@ impl PaletteManager {
 
         items.push(PaletteItem {
             title: "Template: Claude 3.7 Sonnet Hybrid Reasoning".to_string(),
-            subtitle: "Dual-phase reasoning trace with authoritative architectural synthesis".to_string(),
+            subtitle: "Dual-phase reasoning trace with authoritative architectural synthesis"
+                .to_string(),
             category: "Templates",
             action: PaletteAction::SelectTemplate("claude-37-hybrid".to_string()),
         });
@@ -137,7 +141,8 @@ impl PaletteManager {
 
         items.push(PaletteItem {
             title: "Template: Code Refactor & Security Audit".to_string(),
-            subtitle: "Identify algorithmic bottlenecks and produce clean refactored code".to_string(),
+            subtitle: "Identify algorithmic bottlenecks and produce clean refactored code"
+                .to_string(),
             category: "Templates",
             action: PaletteAction::SelectTemplate("clean-refactor".to_string()),
         });

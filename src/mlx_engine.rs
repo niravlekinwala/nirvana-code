@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -76,7 +76,10 @@ impl MlxEngine {
             .map(|s| s.success())
             .unwrap_or(false)
         {
-            return Ok(("python3".to_string(), vec!["-m".to_string(), "mlx_lm".to_string()]));
+            return Ok((
+                "python3".to_string(),
+                vec!["-m".to_string(), "mlx_lm".to_string()],
+            ));
         }
 
         bail!("Could not find Apple MLX ('mlx_lm'). Please install it using: pip install mlx-lm")
@@ -122,7 +125,9 @@ impl MlxEngine {
             }
 
             // Try TCP connection and HTTP GET request
-            if let Ok(mut stream) = TcpStream::connect_timeout(&sock_addr, Duration::from_millis(300)) {
+            if let Ok(mut stream) =
+                TcpStream::connect_timeout(&sock_addr, Duration::from_millis(300))
+            {
                 let req = format!(
                     "GET /v1/models HTTP/1.1\r\nHost: {addr_str}\r\nConnection: close\r\n\r\n"
                 );
@@ -142,9 +147,7 @@ impl MlxEngine {
             std::thread::sleep(Duration::from_millis(100));
         }
 
-        bail!(
-            "Timed out waiting for MLX model server to initialize on port {port}"
-        );
+        bail!("Timed out waiting for MLX model server to initialize on port {port}");
     }
 
     /// Load and launch the Apple MLX model server as an optimized background process
@@ -173,9 +176,7 @@ impl MlxEngine {
 
         // Spawn child process with suppressed outputs to protect TUI terminal state
         let mut cmd = Command::new(&cmd_bin);
-        cmd.args(&args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
+        cmd.args(&args).stdout(Stdio::null()).stderr(Stdio::piped());
 
         let child = cmd
             .spawn()
@@ -558,6 +559,9 @@ mod tests {
                 }
             }
         }
-        assert!(loop_detected, "Repetition detector should detect 4 repeating patterns with multi-byte chars without panicking");
+        assert!(
+            loop_detected,
+            "Repetition detector should detect 4 repeating patterns with multi-byte chars without panicking"
+        );
     }
 }

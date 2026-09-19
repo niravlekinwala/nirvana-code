@@ -1,6 +1,6 @@
-use anyhow::{bail, Result};
-use llama_cpp_2::context::params::LlamaContextParams;
+use anyhow::{Result, bail};
 use llama_cpp_2::context::LlamaContext;
+use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
@@ -15,8 +15,8 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::chat::{ChatMessage, ChatRenderer};
 use crate::engine::{
-    boost_thread_qos, build_sampler, load_model_fitted, GenerationConfig, KvQuantMode, MemoryPlan,
-    ModelEngine, PrefixCache, SharedBackend, StreamEvent,
+    GenerationConfig, KvQuantMode, MemoryPlan, ModelEngine, PrefixCache, SharedBackend,
+    StreamEvent, boost_thread_qos, build_sampler, load_model_fitted,
 };
 use crate::hardware::SiliconProfile;
 
@@ -75,7 +75,8 @@ impl SpeculativeEngine {
         plan.report();
         let use_mlock = plan.use_mlock;
 
-        let target_model = load_model_fitted(&backend, target_path, n_gpu_layers, use_mlock, n_ctx)?;
+        let target_model =
+            load_model_fitted(&backend, target_path, n_gpu_layers, use_mlock, n_ctx)?;
         // The draft is small; pin it fully alongside the target.
         let draft_params = LlamaModelParams::default()
             .with_n_gpu_layers(n_gpu_layers)
@@ -91,8 +92,14 @@ impl SpeculativeEngine {
         let chat = ChatRenderer::detect(&target_model);
 
         Ok(Self {
-            target: Mutex::new(ModelSlot { ctx: None, cache: PrefixCache::default() }),
-            draft: Mutex::new(ModelSlot { ctx: None, cache: PrefixCache::default() }),
+            target: Mutex::new(ModelSlot {
+                ctx: None,
+                cache: PrefixCache::default(),
+            }),
+            draft: Mutex::new(ModelSlot {
+                ctx: None,
+                cache: PrefixCache::default(),
+            }),
             backend,
             target_model: Arc::new(target_model),
             draft_model: Arc::new(draft_model),
@@ -115,7 +122,9 @@ impl SpeculativeEngine {
             );
         }
         if target.token_bos() != draft.token_bos() || target.token_eos() != draft.token_eos() {
-            bail!("Draft and target models use different BOS/EOS tokens; they do not share a tokenizer");
+            bail!(
+                "Draft and target models use different BOS/EOS tokens; they do not share a tokenizer"
+            );
         }
         // Spot-check token text across the shared range
         let n = nt.min(nd);
@@ -124,7 +133,9 @@ impl SpeculativeEngine {
             let a = target.token_to_piece_bytes(tok, 64, true, None).ok();
             let b = draft.token_to_piece_bytes(tok, 64, true, None).ok();
             if a != b {
-                bail!("Draft and target tokenizers disagree on token {id}; speculative decoding needs a matching vocabulary");
+                bail!(
+                    "Draft and target tokenizers disagree on token {id}; speculative decoding needs a matching vocabulary"
+                );
             }
         }
         Ok(())
@@ -165,14 +176,18 @@ impl SpeculativeEngine {
         tx: UnboundedSender<StreamEvent>,
     ) -> Result<()> {
         let n_ctx = self.n_ctx.load(Ordering::Relaxed) as usize;
-        let prompt = self.chat.render_fitting(&self.target_model, messages, n_ctx, config.max_tokens);
+        let prompt =
+            self.chat
+                .render_fitting(&self.target_model, messages, n_ctx, config.max_tokens);
         self.stream_generate(&prompt, config, cancel_token, tx)
     }
 
     fn context_params(&self, n_batch: u32, n_ubatch: u32) -> LlamaContextParams {
         let p_cores = SiliconProfile::detect().p_cores.max(1) as i32;
         LlamaContextParams::default()
-            .with_n_ctx(Some(NonZeroU32::new(self.n_ctx.load(Ordering::Relaxed)).unwrap()))
+            .with_n_ctx(Some(
+                NonZeroU32::new(self.n_ctx.load(Ordering::Relaxed)).unwrap(),
+            ))
             .with_n_threads(p_cores)
             .with_n_threads_batch(p_cores)
             .with_n_batch(n_batch)
@@ -243,8 +258,14 @@ impl SpeculativeEngine {
         let mut draft = self.draft.lock().unwrap();
         self.ensure_context(&mut target, &self.target_model, n_batch, n_ubatch)?;
         self.ensure_context(&mut draft, &self.draft_model, n_batch, n_ubatch)?;
-        let ModelSlot { ctx: t_ctx, cache: t_cache } = &mut *target;
-        let ModelSlot { ctx: d_ctx, cache: d_cache } = &mut *draft;
+        let ModelSlot {
+            ctx: t_ctx,
+            cache: t_cache,
+        } = &mut *target;
+        let ModelSlot {
+            ctx: d_ctx,
+            cache: d_cache,
+        } = &mut *draft;
         let t_ctx = t_ctx.as_mut().unwrap();
         let d_ctx = d_ctx.as_mut().unwrap();
 
@@ -252,12 +273,24 @@ impl SpeculativeEngine {
         let mut d_batch = LlamaBatch::new(batch_size, 1);
 
         let prefix_tokens_reused = t_cache.sync(t_ctx, &prompt_tokens);
-        if !t_cache.prefill(t_ctx, &mut t_batch, &prompt_tokens[prefix_tokens_reused..], batch_size, &cancel_token)? {
+        if !t_cache.prefill(
+            t_ctx,
+            &mut t_batch,
+            &prompt_tokens[prefix_tokens_reused..],
+            batch_size,
+            &cancel_token,
+        )? {
             let _ = tx.send(StreamEvent::Done);
             return Ok(());
         }
         let d_reused = d_cache.sync(d_ctx, &prompt_tokens);
-        if !d_cache.prefill(d_ctx, &mut d_batch, &prompt_tokens[d_reused..], batch_size, &cancel_token)? {
+        if !d_cache.prefill(
+            d_ctx,
+            &mut d_batch,
+            &prompt_tokens[d_reused..],
+            batch_size,
+            &cancel_token,
+        )? {
             let _ = tx.send(StreamEvent::Done);
             return Ok(());
         }
@@ -275,7 +308,10 @@ impl SpeculativeEngine {
 
         let mut emit = |tok: LlamaToken, total: &mut usize| {
             *total += 1;
-            if let Ok(piece) = self.target_model.token_to_piece(tok, &mut decoder, false, None) {
+            if let Ok(piece) = self
+                .target_model
+                .token_to_piece(tok, &mut decoder, false, None)
+            {
                 if !piece.is_empty() {
                     let _ = tx.send(StreamEvent::Token(piece));
                 }
@@ -309,7 +345,13 @@ impl SpeculativeEngine {
             want.extend_from_slice(&t_cache.tokens);
             want.push(pending);
             let d_common = d_cache.sync(d_ctx, &want);
-            if !d_cache.prefill(d_ctx, &mut d_batch, &want[d_common..], batch_size, &cancel_token)? {
+            if !d_cache.prefill(
+                d_ctx,
+                &mut d_batch,
+                &want[d_common..],
+                batch_size,
+                &cancel_token,
+            )? {
                 break;
             }
 

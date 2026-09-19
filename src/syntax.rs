@@ -194,32 +194,86 @@ impl SyntaxHighlighter {
         match lang {
             "rust" | "rs" => &[
                 "fn", "let", "mut", "pub", "struct", "enum", "impl", "trait", "match", "if",
-                "else", "for", "while", "loop", "return", "async", "await", "use", "mod",
-                "const", "static", "type", "where", "move", "unsafe", "ref", "self", "Self",
+                "else", "for", "while", "loop", "return", "async", "await", "use", "mod", "const",
+                "static", "type", "where", "move", "unsafe", "ref", "self", "Self",
             ],
             "python" | "py" => &[
-                "def", "class", "return", "if", "elif", "else", "for", "while", "import",
-                "from", "as", "try", "except", "finally", "with", "lambda", "yield", "async",
-                "await", "pass", "break", "continue", "in", "is", "not", "and", "or",
+                "def", "class", "return", "if", "elif", "else", "for", "while", "import", "from",
+                "as", "try", "except", "finally", "with", "lambda", "yield", "async", "await",
+                "pass", "break", "continue", "in", "is", "not", "and", "or",
             ],
             "javascript" | "js" | "typescript" | "ts" => &[
-                "function", "const", "let", "var", "return", "if", "else", "for", "while",
-                "import", "export", "from", "default", "class", "extends", "async", "await",
-                "try", "catch", "new", "this", "typeof", "interface", "type",
+                "function",
+                "const",
+                "let",
+                "var",
+                "return",
+                "if",
+                "else",
+                "for",
+                "while",
+                "import",
+                "export",
+                "from",
+                "default",
+                "class",
+                "extends",
+                "async",
+                "await",
+                "try",
+                "catch",
+                "new",
+                "this",
+                "typeof",
+                "interface",
+                "type",
             ],
             "c" | "cpp" | "cxx" => &[
-                "int", "char", "void", "return", "if", "else", "for", "while", "class",
-                "struct", "namespace", "using", "template", "typename", "public", "private",
-                "protected", "const", "auto", "virtual", "override",
+                "int",
+                "char",
+                "void",
+                "return",
+                "if",
+                "else",
+                "for",
+                "while",
+                "class",
+                "struct",
+                "namespace",
+                "using",
+                "template",
+                "typename",
+                "public",
+                "private",
+                "protected",
+                "const",
+                "auto",
+                "virtual",
+                "override",
             ],
             "go" => &[
-                "func", "package", "import", "return", "if", "else", "for", "range", "var",
-                "type", "struct", "interface", "go", "chan", "select", "case", "default",
+                "func",
+                "package",
+                "import",
+                "return",
+                "if",
+                "else",
+                "for",
+                "range",
+                "var",
+                "type",
+                "struct",
+                "interface",
+                "go",
+                "chan",
+                "select",
+                "case",
+                "default",
             ],
             "sql" => &[
-                "SELECT", "FROM", "WHERE", "INSERT", "INTO", "UPDATE", "DELETE", "JOIN",
-                "LEFT", "RIGHT", "INNER", "GROUP", "BY", "ORDER", "HAVING", "LIMIT", "CREATE",
-                "TABLE", "DROP", "ALTER", "select", "from", "where", "insert", "update", "delete",
+                "SELECT", "FROM", "WHERE", "INSERT", "INTO", "UPDATE", "DELETE", "JOIN", "LEFT",
+                "RIGHT", "INNER", "GROUP", "BY", "ORDER", "HAVING", "LIMIT", "CREATE", "TABLE",
+                "DROP", "ALTER", "select", "from", "where", "insert", "update", "delete",
             ],
             _ => &["if", "else", "for", "while", "return", "true", "false"],
         }
@@ -233,12 +287,20 @@ impl SyntaxHighlighter {
                 "Err", "Arc", "Box", "Rc", "Path", "PathBuf",
             ],
             "python" | "py" => &[
-                "int", "str", "float", "bool", "list", "dict", "set", "tuple", "Any",
-                "Optional", "List", "Dict", "Union", "None", "True", "False",
+                "int", "str", "float", "bool", "list", "dict", "set", "tuple", "Any", "Optional",
+                "List", "Dict", "Union", "None", "True", "False",
             ],
             "typescript" | "ts" => &[
-                "string", "number", "boolean", "any", "void", "null", "undefined", "Promise",
-                "Array", "Record",
+                "string",
+                "number",
+                "boolean",
+                "any",
+                "void",
+                "null",
+                "undefined",
+                "Promise",
+                "Array",
+                "Record",
             ],
             _ => &["int", "float", "double", "bool", "string", "void"],
         }
@@ -284,7 +346,11 @@ impl SyntaxHighlighter {
                 }
                 ContentBlock::Code { lang, code, index } => {
                     // Header frame for code block
-                    let header = format!("  ⚡ [Snippet #{}] Lang: {}  (Ctrl+Y to copy)", index + 1, lang.to_uppercase());
+                    let header = format!(
+                        "  ⚡ [Snippet #{}] Lang: {}  (Ctrl+Y to copy)",
+                        index + 1,
+                        lang.to_uppercase()
+                    );
                     lines.push(Line::from(vec![Span::styled(
                         header,
                         Style::default()
@@ -302,10 +368,7 @@ impl SyntaxHighlighter {
                         )];
                         let highlighted = Self::highlight_code_line(code_line, &lang);
                         for span in highlighted {
-                            line_spans.push(Span::styled(
-                                span.content.to_string(),
-                                span.style,
-                            ));
+                            line_spans.push(Span::styled(span.content.to_string(), span.style));
                         }
                         lines.push(Line::from(line_spans));
                     }

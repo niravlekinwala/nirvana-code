@@ -8,13 +8,26 @@ use std::path::PathBuf;
     version = env!("CARGO_PKG_VERSION")
 )]
 pub struct Cli {
-    #[arg(short = 'm', long = "model", global = true, help = "Path to GGUF model file or catalog ID")]
+    #[arg(
+        short = 'm',
+        long = "model",
+        global = true,
+        help = "Path to GGUF model file or catalog ID"
+    )]
     pub model: Option<PathBuf>,
 
-    #[arg(long = "draft-model", global = true, help = "Path to draft model for speculative decoding")]
+    #[arg(
+        long = "draft-model",
+        global = true,
+        help = "Path to draft model for speculative decoding"
+    )]
     pub draft_model: Option<PathBuf>,
 
-    #[arg(long = "speculative", global = true, help = "Enable speculative decoding engine")]
+    #[arg(
+        long = "speculative",
+        global = true,
+        help = "Enable speculative decoding engine"
+    )]
     pub speculative: bool,
 
     #[arg(
@@ -25,7 +38,12 @@ pub struct Cli {
     )]
     pub n_draft: usize,
 
-    #[arg(long = "verbose", short = 'v', global = true, help = "Keep llama.cpp diagnostics on stderr")]
+    #[arg(
+        long = "verbose",
+        short = 'v',
+        global = true,
+        help = "Keep llama.cpp diagnostics on stderr"
+    )]
     pub verbose: bool,
 
     #[arg(
@@ -206,10 +224,18 @@ pub enum Commands {
         )]
         num_tokens: usize,
 
-        #[arg(long = "runs", default_value = "5", help = "Number of measured runs (after one warm-up)")]
+        #[arg(
+            long = "runs",
+            default_value = "5",
+            help = "Number of measured runs (after one warm-up)"
+        )]
         runs: usize,
 
-        #[arg(long = "prompt-tokens", default_value = "512", help = "Approximate prompt length in tokens")]
+        #[arg(
+            long = "prompt-tokens",
+            default_value = "512",
+            help = "Approximate prompt length in tokens"
+        )]
         prompt_tokens: usize,
 
         #[arg(long = "json", help = "Emit machine-readable JSON instead of a table")]
@@ -270,10 +296,7 @@ pub enum Commands {
         )]
         host: String,
 
-        #[arg(
-            long = "no-open",
-            help = "Do not automatically open the browser"
-        )]
+        #[arg(long = "no-open", help = "Do not automatically open the browser")]
         no_open: bool,
     },
 }
