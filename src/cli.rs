@@ -29,6 +29,35 @@ pub struct Cli {
     pub verbose: bool,
 
     #[arg(
+        long = "workspace",
+        global = true,
+        help = "Directory the server's project endpoints may read (web: defaults to cwd; serve: disabled unless set)"
+    )]
+    pub workspace: Option<PathBuf>,
+
+    #[arg(
+        long = "api-key",
+        global = true,
+        env = "NIRVANA_API_KEY",
+        help = "Require 'Authorization: Bearer <key>' on /v1/* (auto-generated when binding beyond loopback)"
+    )]
+    pub api_key: Option<String>,
+
+    #[arg(
+        long = "cors-origin",
+        global = true,
+        help = "Origin allowed to call the API from a browser (repeatable; '*' allows any). Default: same-origin only"
+    )]
+    pub cors_origin: Vec<String>,
+
+    #[arg(
+        long = "allow-host",
+        global = true,
+        help = "Additional Host header values to accept (e.g. a LAN hostname); repeatable"
+    )]
+    pub allow_host: Vec<String>,
+
+    #[arg(
         long = "kv-type",
         global = true,
         default_value = "f16",

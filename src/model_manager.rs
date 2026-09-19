@@ -322,6 +322,34 @@ impl ModelManager {
         }
     }
 
+    /// Resolve `target` (index, name, substring, or catalog id) against the
+    /// installed models only. Unlike [`Self::resolve_model_path`] this never
+    /// accepts a filesystem path, so a network client cannot point the server
+    /// at an arbitrary file.
+    pub fn resolve_installed_model(target: &str) -> Option<PathBuf> {
+        let target = target.trim();
+        if target.is_empty() {
+            return None;
+        }
+        let installed = Self::list_installed();
+        if let Ok(idx) = target.parse::<usize>() {
+            if idx >= 1 && idx <= installed.len() {
+                return Some(installed[idx - 1].0.clone());
+            }
+        }
+        let lower = target.to_lowercase();
+        if let Some((p, _, _)) = installed.iter().find(|(_, name, _)| name == target) {
+            return Some(p.clone());
+        }
+        if let Some((p, _, _)) = installed.iter().find(|(_, name, _)| name.to_lowercase().contains(&lower)) {
+            return Some(p.clone());
+        }
+        if let Some(meta) = MODEL_CATALOG.iter().find(|m| m.id == target) {
+            return installed.iter().find(|(_, name, _)| name == meta.filename).map(|(p, _, _)| p.clone());
+        }
+        None
+    }
+
     pub fn resolve_model_path(explicit_path: Option<&Path>) -> Option<PathBuf> {
         // 1. Explicit CLI argument (path, catalog ID, substring, or index number)
         if let Some(path) = explicit_path {

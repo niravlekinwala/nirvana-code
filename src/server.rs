@@ -1,6 +1,8 @@
 use anyhow::Result;
 use axum::{
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, Request, State},
+    http::{header, HeaderValue, StatusCode},
+    middleware::{self, Next},
     response::{
         sse::{Event, KeepAlive, Sse},
         Html, IntoResponse, Response,
@@ -8,6 +10,8 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
@@ -16,7 +20,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::RwLock;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::attachment::Attachment;
 use crate::chat::ChatMessage;
@@ -29,6 +33,29 @@ pub struct ServerEngineInner {
     pub model_path: PathBuf,
 }
 
+/// Request-side hardening. See RELEASE_PLAN.md §3.
+pub struct Security {
+    /// Directory the project endpoints may read. `None` disables them.
+    pub workspace: Option<PathBuf>,
+    /// Bearer token required on every `/v1/*` route when set.
+    pub api_key: Option<String>,
+    /// Origins allowed by CORS. Empty = no CORS headers at all (same-origin only).
+    pub cors_origins: Vec<String>,
+    /// `Host` header values accepted, guarding against DNS rebinding.
+    pub allowed_hosts: Vec<String>,
+}
+
+pub struct ServerOptions {
+    pub host: String,
+    pub port: u16,
+    pub socket_path: Option<PathBuf>,
+    pub gpu_layers: u32,
+    pub use_mlock: bool,
+    pub kv_mode: KvQuantMode,
+    pub ctx_size: u32,
+    pub security: Security,
+}
+
 #[derive(Clone)]
 pub struct ServerState {
     pub inner: Arc<RwLock<ServerEngineInner>>,
@@ -36,13 +63,81 @@ pub struct ServerState {
     pub use_mlock: bool,
     pub kv_mode: KvQuantMode,
     pub ctx_size: u32,
-    pub active_cancel: Arc<tokio::sync::Mutex<Option<Arc<AtomicBool>>>>,
+    /// In-flight generations by request id, so `/v1/chat/stop` can target one.
+    pub active_cancel: Arc<tokio::sync::Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    pub security: Arc<Security>,
+    request_counter: Arc<AtomicU64>,
+}
+
+impl ServerState {
+    fn next_request_id(&self) -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let n = self.request_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!("chatcmpl-{nanos:x}-{n}")
+    }
+}
+
+/// Reject requests whose `Host` is not one we serve on (DNS-rebinding guard)
+/// and, when an API key is configured, any `/v1/*` call without it.
+async fn guard(State(state): State<ServerState>, req: Request, next: Next) -> Response {
+    let sec = &state.security;
+
+    let host_ok = match req.headers().get(header::HOST).and_then(|h| h.to_str().ok()) {
+        Some(h) => {
+            let bare = h.rsplit_once(':').map(|(name, _)| name).unwrap_or(h);
+            let bare = bare.trim_matches(|c| c == '[' || c == ']');
+            sec.allowed_hosts.iter().any(|a| a.eq_ignore_ascii_case(bare))
+        }
+        // HTTP/1.0 or Unix-socket clients may omit it; nothing to rebind there.
+        None => true,
+    };
+    if !host_ok {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": "Host header not allowed" }))).into_response();
+    }
+
+    if let Some(key) = &sec.api_key {
+        if req.uri().path().starts_with("/v1/") {
+            let presented = req
+                .headers()
+                .get(header::AUTHORIZATION)
+                .and_then(|h| h.to_str().ok())
+                .and_then(|h| h.strip_prefix("Bearer "))
+                .map(str::trim);
+            if presented != Some(key.as_str()) {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    [(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"))],
+                    Json(serde_json::json!({ "error": "Missing or invalid API key" })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    next.run(req).await
 }
 
 struct CancelOnDrop(Arc<AtomicBool>);
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+struct UnregisterOnDrop {
+    map: Arc<tokio::sync::Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    id: String,
+}
+impl Drop for UnregisterOnDrop {
+    fn drop(&mut self) {
+        let map = self.map.clone();
+        let id = std::mem::take(&mut self.id);
+        tokio::spawn(async move {
+            map.lock().await.remove(&id);
+        });
     }
 }
 
@@ -167,6 +262,13 @@ pub struct SetContextRequest {
     pub ctx_size: u32,
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct StopRequest {
+    /// Request id from the completion stream; omit to stop everything in flight.
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ProjectScanRequest {
     #[serde(default)]
@@ -264,7 +366,26 @@ pub struct ChunkDelta {
 }
 
 pub fn create_router(state: ServerState) -> Router {
-    Router::new()
+    let cors = if state.security.cors_origins.is_empty() {
+        None
+    } else if state.security.cors_origins.iter().any(|o| o == "*") {
+        Some(CorsLayer::permissive())
+    } else {
+        let origins: Vec<HeaderValue> = state
+            .security
+            .cors_origins
+            .iter()
+            .filter_map(|o| HeaderValue::from_str(o).ok())
+            .collect();
+        Some(
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::list(origins))
+                .allow_methods(tower_http::cors::Any)
+                .allow_headers(tower_http::cors::Any),
+        )
+    };
+
+    let router = Router::new()
         .route("/", get(handle_index))
         .route("/index.html", get(handle_index))
         .route("/v1/models", get(handle_models))
@@ -277,8 +398,13 @@ pub fn create_router(state: ServerState) -> Router {
         .route("/v1/chat/stop", post(handle_chat_stop))
         .route("/v1/engine/reset", post(handle_engine_reset))
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
-        .layer(CorsLayer::permissive())
-        .with_state(state)
+        .layer(middleware::from_fn_with_state(state.clone(), guard));
+
+    let router = match cors {
+        Some(layer) => router.layer(layer),
+        None => router,
+    };
+    router.with_state(state)
 }
 
 async fn handle_process_attachment(
@@ -425,7 +551,8 @@ async fn handle_load_model(
             .into_response();
     }
 
-    let resolved_path = match ModelManager::resolve_model_path(Some(Path::new(target))) {
+    // Only models from the known model directories; never an arbitrary path.
+    let resolved_path = match ModelManager::resolve_installed_model(target) {
         Some(p) => p,
         None => {
             return (
@@ -577,25 +704,39 @@ async fn handle_set_context(
     }
 }
 
-async fn handle_chat_stop(State(state): State<ServerState>) -> Response {
+async fn handle_chat_stop(
+    State(state): State<ServerState>,
+    body: Option<Json<StopRequest>>,
+) -> Response {
+    let wanted = body.and_then(|Json(b)| b.id);
     let mut active = state.active_cancel.lock().await;
-    let stopped = if let Some(token) = active.take() {
-        token.store(true, std::sync::atomic::Ordering::Relaxed);
-        true
-    } else {
-        false
-    };
+    let mut stopped = 0usize;
+    match wanted {
+        Some(id) => {
+            if let Some(token) = active.remove(&id) {
+                token.store(true, std::sync::atomic::Ordering::Relaxed);
+                stopped = 1;
+            }
+        }
+        None => {
+            for (_, token) in active.drain() {
+                token.store(true, std::sync::atomic::Ordering::Relaxed);
+                stopped += 1;
+            }
+        }
+    }
     Json(serde_json::json!({
         "status": "ok",
-        "stopped": stopped,
-        "message": if stopped { "Active generation stopped" } else { "No generation was active" }
+        "stopped": stopped > 0,
+        "count": stopped,
+        "message": if stopped > 0 { "Generation stopped" } else { "No matching generation was active" }
     }))
     .into_response()
 }
 
 async fn handle_engine_reset(State(state): State<ServerState>) -> Response {
     let mut active = state.active_cancel.lock().await;
-    if let Some(token) = active.take() {
+    for (_, token) in active.drain() {
         token.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     drop(active);
@@ -614,36 +755,51 @@ async fn handle_engine_reset(State(state): State<ServerState>) -> Response {
     .into_response()
 }
 
+/// Resolve a client-supplied path to a canonical location inside the
+/// configured workspace, or explain why it cannot be served.
+fn confine_to_workspace(sec: &Security, requested: Option<&str>) -> Result<PathBuf, Box<Response>> {
+    let Some(workspace) = sec.workspace.as_ref() else {
+        return Err(Box::new((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "Project browsing is disabled. Start the server with --workspace <dir> to enable it."
+            })),
+        )
+            .into_response()));
+    };
+    let candidate = match requested.map(str::trim).filter(|p| !p.is_empty()) {
+        None => workspace.clone(),
+        Some(p) => {
+            let p = Path::new(p);
+            if p.is_absolute() { p.to_path_buf() } else { workspace.join(p) }
+        }
+    };
+    let canonical = candidate.canonicalize().map_err(|e| {
+        Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("Invalid path: {e}") })),
+            )
+                .into_response(),
+        )
+    })?;
+    if !canonical.starts_with(workspace) {
+        return Err(Box::new((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "Path is outside the configured workspace." })),
+        )
+            .into_response()));
+    }
+    Ok(canonical)
+}
+
 async fn handle_project_scan(
+    State(state): State<ServerState>,
     Json(req): Json<ProjectScanRequest>,
 ) -> Response {
-    let root_path_buf = if let Some(ref p) = req.path {
-        let trimmed = p.trim();
-        if trimmed.is_empty() {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-        } else {
-            let path = PathBuf::from(trimmed);
-            if path.is_relative() {
-                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(path)
-            } else {
-                path
-            }
-        }
-    } else {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-    };
-
-    let canonical_root = match root_path_buf.canonicalize() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                axum::http::StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": format!("Invalid project directory path: {}", e)
-                })),
-            )
-                .into_response();
-        }
+    let canonical_root = match confine_to_workspace(&state.security, req.path.as_deref()) {
+        Ok(p) => p,
+        Err(resp) => return *resp,
     };
 
     if !canonical_root.is_dir() {
@@ -764,20 +920,16 @@ fn scan_dir_recursive(root: &Path, current: &Path, depth: usize, out: &mut Vec<P
 }
 
 async fn handle_project_file(
+    State(state): State<ServerState>,
     Json(req): Json<ProjectFileRequest>,
 ) -> Response {
-    let root = Path::new(&req.root_path);
-    let canonical_root = match root.canonicalize() {
-        Ok(c) => c,
-        Err(_) => {
-            return (
-                axum::http::StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "Invalid project root path." })),
-            )
-                .into_response();
-        }
+    let canonical_root = match confine_to_workspace(&state.security, Some(&req.root_path)) {
+        Ok(p) => p,
+        Err(resp) => return *resp,
     };
 
+    // Resolve the file relative to the root, then re-check it did not escape
+    // via `..` or a symlink.
     let target = canonical_root.join(&req.file_path);
     let canonical_target = match target.canonicalize() {
         Ok(c) => c,
@@ -919,7 +1071,7 @@ async fn handle_chat_completions(
             };
 
             if current_differs {
-                if let Some(new_path) = ModelManager::resolve_model_path(Some(Path::new(req_trim))) {
+                if let Some(new_path) = ModelManager::resolve_installed_model(req_trim) {
                     let should_load = {
                         let inner = state.inner.read().await;
                         inner.model_path != new_path
@@ -988,7 +1140,7 @@ async fn handle_chat_completions(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let req_id = format!("chatcmpl-{now}");
+    let req_id = state.next_request_id();
 
     let config = GenerationConfig {
         max_tokens: payload.max_tokens,
@@ -1003,11 +1155,12 @@ async fn handle_chat_completions(
     let (tx, mut rx) = unbounded_channel();
     let cancel = Arc::new(AtomicBool::new(false));
 
-    // Register active cancel token so /v1/chat/stop can immediately abort
+    // Register so /v1/chat/stop can abort this request by id (or all of them)
     {
         let mut active = state.active_cancel.lock().await;
-        *active = Some(cancel.clone());
+        active.insert(req_id.clone(), cancel.clone());
     }
+    let unregister = UnregisterOnDrop { map: state.active_cancel.clone(), id: req_id.clone() };
 
     let cancel_clone = cancel.clone();
     let engine_clone = engine.clone();
@@ -1025,6 +1178,7 @@ async fn handle_chat_completions(
         let cancel_guard = CancelOnDrop(cancel.clone());
         let stream = async_stream::stream! {
             let _guard = cancel_guard;
+            let _unregister = unregister;
             // First chunk with role
             let initial_chunk = ChatCompletionChunk {
                 id: req_id.clone(),
@@ -1165,32 +1319,30 @@ async fn handle_chat_completions(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn run_server(
     engine: InferenceEngine,
     model_name: String,
     model_path: PathBuf,
-    host: &str,
-    port: u16,
-    socket_path: Option<PathBuf>,
-    gpu_layers: u32,
-    use_mlock: bool,
-    kv_mode: KvQuantMode,
-    ctx_size: u32,
+    opts: ServerOptions,
 ) -> Result<()> {
+    let ServerOptions { host, port, socket_path, gpu_layers, use_mlock, kv_mode, ctx_size, security } = opts;
+    let host = host.as_str();
     let inner = Arc::new(RwLock::new(ServerEngineInner {
         engine,
         model_name: model_name.clone(),
         model_path,
     }));
 
+    let security = Arc::new(security);
     let state = ServerState {
         inner,
         gpu_layers,
         use_mlock,
         kv_mode,
         ctx_size,
-        active_cancel: Arc::new(tokio::sync::Mutex::new(None)),
+        active_cancel: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        security: security.clone(),
+        request_counter: Arc::new(AtomicU64::new(0)),
     };
 
     let app = create_router(state);
@@ -1202,6 +1354,19 @@ pub async fn run_server(
     println!("   Chat API URL:    http://{host}:{port}/v1/chat/completions");
     println!("   Models API URL:  http://{host}:{port}/v1/models");
     println!("   Switch API URL:  POST http://{host}:{port}/v1/models/load");
+    match &security.workspace {
+        Some(w) => println!("   Workspace:       {} (project browsing confined here)", w.display()),
+        None => println!("   Workspace:       none (project browsing disabled; use --workspace)"),
+    }
+    match &security.api_key {
+        Some(k) => println!("   API key:         required — Authorization: Bearer {k}"),
+        None => println!("   API key:         none (loopback only; use --api-key to require one)"),
+    }
+    if security.cors_origins.is_empty() {
+        println!("   CORS:            same-origin only");
+    } else {
+        println!("   CORS:            {}", security.cors_origins.join(", "));
+    }
 
     // If Unix socket is configured
     if let Some(ref sock) = socket_path {
@@ -1210,6 +1375,11 @@ pub async fn run_server(
         }
         println!("   Unix Socket:     {}", sock.display());
         let unix_listener = tokio::net::UnixListener::bind(sock)?;
+        // Only this user may talk to the socket
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(sock, std::fs::Permissions::from_mode(0o600));
+        }
         let app_clone = app.clone();
         tokio::spawn(async move {
             let _ = axum::serve(unix_listener, app_clone).await;
